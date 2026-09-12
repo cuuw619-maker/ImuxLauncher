@@ -32,23 +32,36 @@ class AppAdapter(private var items: List<AppInfo>, private val grid: Boolean = f
     }
 
     private class AppRow(context: android.content.Context, grid: Boolean) : LinearLayout(context) {
+        private fun dp(value: Float): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
+
         init {
             id = android.R.id.content
             orientation = VERTICAL
             gravity = Gravity.CENTER
-            setPadding(if (grid) 6 else 28, if (grid) 12 else 18, if (grid) 6 else 28, if (grid) 12 else 18)
+            if (grid) {
+                // Launcher3 uses an icon image size around 48–56dp on phone profiles.
+                // Keep the same physical scale instead of accidentally using raw pixels.
+                setPadding(dp(3f), dp(4f), dp(3f), dp(4f))
+            } else {
+                setPadding(dp(20f), dp(12f), dp(20f), dp(12f))
+            }
             setBackgroundColor(if (grid) Color.TRANSPARENT else Color.rgb(20, 20, 24))
+
+            val iconSize = if (grid) dp(54f) else dp(64f)
             val icon = ImageView(context).apply {
                 id = android.R.id.icon
-                layoutParams = LayoutParams(if (grid) 56 else 64, if (grid) 56 else 64)
+                layoutParams = LayoutParams(iconSize, iconSize)
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
             }
             val text = TextView(context).apply {
                 id = android.R.id.text1
-                textSize = if (grid) 12f else 17f
+                textSize = if (grid) 13f else 17f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
                 maxLines = 1
-                setPadding(if (grid) 0 else 24, if (grid) 6 else 0, 0, 0)
+                ellipsize = android.text.TextUtils.TruncateAt.END
+                setPadding(if (grid) 0 else dp(16f), if (grid) dp(3f) else 0, 0, 0)
             }
             addView(icon)
             addView(text, LayoutParams(-1, ViewGroup.LayoutParams.WRAP_CONTENT))
