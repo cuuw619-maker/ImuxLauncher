@@ -68,66 +68,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun showSetup() {
         val scroll = ScrollView(this)
-        val setup = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 72, 32, 40)
-            setBackgroundColor(Color.rgb(10, 10, 14))
-        }
-        setup.addView(TextView(this).apply {
-            text = "IMUX"
-            textSize = 42f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }, matchWrap())
-        setup.addView(TextView(this).apply {
-            text = "Launcher setup"
-            textSize = 20f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, 4, 0, 28)
-        }, matchWrap())
-
-        rootStatus = TextView(this).apply {
-            text = "Root: checking…"
-            textSize = 16f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, 0, 0, 16)
-        }
+        val setup = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 72, 32, 40); setBackgroundColor(Color.rgb(10, 10, 14)) }
+        setup.addView(TextView(this).apply { text = "IMUX"; textSize = 42f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE) }, matchWrap())
+        setup.addView(TextView(this).apply { text = "Launcher setup"; textSize = 20f; setTextColor(Color.LTGRAY); setPadding(0, 4, 0, 28) }, matchWrap())
+        rootStatus = TextView(this).apply { text = "Root: checking…"; textSize = 16f; setTextColor(Color.LTGRAY); setPadding(0, 0, 0, 16) }
         setup.addView(rootStatus, matchWrap())
-        rootButton = Button(this).apply {
-            text = "Provide root"
-            isAllCaps = false
-            setOnClickListener { requestRoot() }
-        }
+        rootButton = Button(this).apply { text = "Provide root"; isAllCaps = false; setOnClickListener { requestRoot() } }
         setup.addView(rootButton, matchWrap())
-
-        setup.addView(Button(this).apply {
-            text = "Set Imux as default launcher"
-            isAllCaps = false
-            setOnClickListener { requestDefaultLauncher() }
-        }, matchWrap().apply { topMargin = 10 })
-
-        setup.addView(CheckBox(this).apply {
-            text = "Protect Imux as preferred launcher"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("launcher_protection", false)
-            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("launcher_protection", checked).apply() }
-        }, matchWrap().apply { topMargin = 12 })
-
-        setup.addView(TextView(this).apply {
-            text = "Imux can keep checking that it is the selected HOME target. The bottom system navigation swipe is controlled by Android and cannot be intercepted by a normal APK."
-            textSize = 14f
-            setTextColor(Color.GRAY)
-            setPadding(0, 6, 0, 22)
-        }, matchWrap())
-
-        setup.addView(Button(this).apply {
-            text = "Enter desktop"
-            isAllCaps = false
-            setOnClickListener {
-                prefs.edit().putBoolean("setup_complete", true).apply()
-                showDesktop()
-            }
-        }, matchWrap())
+        setup.addView(Button(this).apply { text = "Set Imux as default launcher"; isAllCaps = false; setOnClickListener { requestDefaultLauncher() } }, matchWrap().apply { topMargin = 10 })
+        setup.addView(CheckBox(this).apply { text = "Protect Imux as preferred launcher"; setTextColor(Color.WHITE); isChecked = prefs.getBoolean("launcher_protection", false); setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("launcher_protection", checked).apply() } }, matchWrap().apply { topMargin = 12 })
+        setup.addView(TextView(this).apply { text = "Imux can keep checking that it is the selected HOME target. The bottom system navigation swipe is controlled by Android and cannot be intercepted by a normal APK."; textSize = 14f; setTextColor(Color.GRAY); setPadding(0, 6, 0, 22) }, matchWrap())
+        setup.addView(Button(this).apply { text = "Enter desktop"; isAllCaps = false; setOnClickListener { prefs.edit().putBoolean("setup_complete", true).apply(); showDesktop() } }, matchWrap())
         scroll.addView(setup)
         setContentView(scroll)
     }
@@ -144,41 +95,19 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showDesktop() {
-        desktopContainer = GestureFrameLayout(this).apply {
-            setBackgroundColor(Color.rgb(8, 9, 13))
-            onSwipeUp = { openDrawer() }
-            onSwipeDown = { closeDrawer() }
-        }
-        val content = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 46, 24, 18)
-        }
+        desktopContainer = GestureFrameLayout(this).apply { setBackgroundColor(Color.rgb(8, 9, 13)); onSwipeUp = { openDrawer() }; onSwipeDown = { closeDrawer() } }
+        val content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 46, 24, 18) }
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-        val clock = TextView(this).apply {
-            textSize = 40f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }
+        val clock = TextView(this).apply { textSize = 40f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE) }
         refreshClock(clock)
         top.addView(clock, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(TextView(this).apply { text = "IMUX"; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.GRAY) })
         content.addView(top, matchWrap())
-        content.addView(TextView(this).apply {
-            text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date())
-            textSize = 15f
-            setTextColor(Color.GRAY)
-            setPadding(2, 0, 0, 26)
-        }, matchWrap())
-        content.addView(TextView(this).apply {
-            text = "Swipe up to open applications"
-            textSize = 14f
-            setTextColor(Color.DKGRAY)
-            gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(-1, 0, 1f))
+        content.addView(TextView(this).apply { text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(Date()); textSize = 15f; setTextColor(Color.GRAY); setPadding(2, 0, 0, 26) }, matchWrap())
+        content.addView(TextView(this).apply { text = "Swipe up to open applications"; textSize = 14f; setTextColor(Color.DKGRAY); gravity = Gravity.CENTER }, LinearLayout.LayoutParams(-1, 0, 1f))
         val dock = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(8, 12, 8, 8); setBackgroundColor(Color.rgb(24, 25, 31)) }
         content.addView(dock, LinearLayout.LayoutParams(-1, 82))
         desktopContainer.addView(content, FrameLayout.LayoutParams(-1, -1))
-
         drawerContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(22, 42, 22, 16); setBackgroundColor(Color.rgb(12, 13, 18)); visibility = View.GONE }
         val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         header.addView(TextView(this@MainActivity).apply { text = "Applications"; textSize = 28f; typeface = Typeface.DEFAULT_BOLD; setTextColor(Color.WHITE) }, LinearLayout.LayoutParams(0, -2, 1f))
@@ -194,6 +123,7 @@ class MainActivity : AppCompatActivity() {
         desktopContainer.addView(drawerContainer, FrameLayout.LayoutParams(-1, -1))
         setContentView(desktopContainer)
         refreshDesktopApps()
+        verifyLauncherProtection()
     }
 
     private fun refreshDesktopApps() {
@@ -212,18 +142,9 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { app.launch() }
     }
 
-    private fun openDrawer() {
-        if (!::drawerContainer.isInitialized) return
-        drawerContainer.visibility = View.VISIBLE
-        drawerContainer.alpha = 0f
-        drawerContainer.animate().alpha(1f).setDuration(180).start()
-        filterDrawer(drawerSearch.text?.toString().orEmpty())
-    }
+    private fun openDrawer() { if (!::drawerContainer.isInitialized) return; drawerContainer.visibility = View.VISIBLE; drawerContainer.alpha = 0f; drawerContainer.animate().alpha(1f).setDuration(180).start(); filterDrawer(drawerSearch.text?.toString().orEmpty()) }
 
-    private fun closeDrawer() {
-        if (!::drawerContainer.isInitialized || drawerContainer.visibility != View.VISIBLE) return
-        drawerContainer.animate().alpha(0f).setDuration(140).withEndAction { drawerContainer.visibility = View.GONE }.start()
-    }
+    private fun closeDrawer() { if (!::drawerContainer.isInitialized || drawerContainer.visibility != View.VISIBLE) return; drawerContainer.animate().alpha(0f).setDuration(140).withEndAction { drawerContainer.visibility = View.GONE }.start() }
 
     private fun filterDrawer(query: String) {
         if (!::drawerAdapter.isInitialized) return
@@ -257,6 +178,7 @@ class MainActivity : AppCompatActivity() {
                 rootGranted = result.isSuccess
                 if (::rootStatus.isInitialized) rootStatus.text = if (rootGranted) "Root: granted" else "Root: denied / unavailable"
                 if (::rootButton.isInitialized) { rootButton.isEnabled = !rootGranted; rootButton.text = if (rootGranted) "Root granted" else "Provide root again" }
+                if (rootGranted) verifyLauncherProtection()
             }
         }
     }
@@ -273,10 +195,7 @@ class MainActivity : AppCompatActivity() {
         return roleManager.isRoleAvailable(RoleManager.ROLE_HOME) && roleManager.isRoleHeld(RoleManager.ROLE_HOME)
     }
 
-    private fun refreshClock(view: TextView) {
-        view.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
-        view.postDelayed({ if (!isFinishing) refreshClock(view) }, 30_000)
-    }
+    private fun refreshClock(view: TextView) { view.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()); view.postDelayed({ if (!isFinishing) refreshClock(view) }, 30_000) }
 
     private fun matchWrap() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
 
