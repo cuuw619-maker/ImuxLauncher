@@ -31,7 +31,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -84,15 +83,20 @@ class MainActivity : ComponentActivity() {
     }.onFailure { CrashLogger.log(this, "ERROR", "App scan failed: ${it.stackTraceToString()}") }
         .getOrDefault(emptyList())
 
-    private fun requestDefaultLauncher() = runCatching {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val role = getSystemService<RoleManager>()
-            if (role?.isRoleAvailable(RoleManager.ROLE_HOME) == true) {
-                startActivity(role.createRequestRoleIntent(RoleManager.ROLE_HOME)); return
+    private fun requestDefaultLauncher() {
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val role = getSystemService<RoleManager>()
+                if (role?.isRoleAvailable(RoleManager.ROLE_HOME) == true) {
+                    startActivity(role.createRequestRoleIntent(RoleManager.ROLE_HOME))
+                } else {
+                    startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+                }
+            } else {
+                startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
             }
-        }
-        startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
-    }.onFailure { CrashLogger.log(this, "ERROR", "HOME role request failed: ${it.stackTraceToString()}") }
+        }.onFailure { CrashLogger.log(this, "ERROR", "HOME role request failed: ${it.stackTraceToString()}") }
+    }
 
     private fun requestRoot() {
         Thread {
@@ -143,10 +147,7 @@ private fun ImuxHome(
             },
             floatingActionButton = { FloatingActionButton({ drawer = true }) { Icon(Icons.Default.Apps, "All apps") } }
         ) { pad ->
-            HorizontalPager(
-                state = pager, modifier = Modifier.fillMaxSize().padding(pad),
-                contentPadding = PaddingValues(horizontal = 10.dp), pageSpacing = 8.dp
-            ) { page ->
+            HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(horizontal = 10.dp), pageSpacing = 8.dp) { page ->
                 val pageApps = pages[page]
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(4), modifier = Modifier.fillMaxSize(),
@@ -172,10 +173,9 @@ private fun ImuxHome(
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search applications") })
                     Spacer(Modifier.height(10.dp))
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4), contentPadding = PaddingValues(bottom = 20.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) { items(filtered, key = { it.packageName }) { AppCell(it) { drawer = false } } }
+                    LazyVerticalGrid(columns = GridCells.Fixed(4), contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(filtered, key = { it.packageName }) { AppCell(it) { drawer = false } }
+                    }
                 }
             }
         }
@@ -199,10 +199,7 @@ private fun ImuxHome(
 
 @Composable
 private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
-    Card(
-        onClick = { onLaunch(); app.launch() }, modifier = Modifier.fillMaxWidth().aspectRatio(.78f),
-        shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
-    ) {
+    Card(onClick = { onLaunch(); app.launch() }, modifier = Modifier.fillMaxWidth().aspectRatio(.78f), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
         Column(Modifier.fillMaxSize().padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
             AndroidView({ context -> android.widget.ImageView(context).apply { scaleType = android.widget.ImageView.ScaleType.FIT_CENTER } }, update = { it.setImageDrawable(app.icon) }, modifier = Modifier.size(50.dp))
             Spacer(Modifier.height(5.dp)); Text(app.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
@@ -227,11 +224,7 @@ private fun LogDialog(onDismiss: () -> Unit) {
         onDismissRequest = onDismiss, title = { Text("Imux diagnostics") },
         text = { Text(log, style = MaterialTheme.typography.bodySmall) },
         confirmButton = {
-            TextButton({
-                context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(
-                    android.content.ClipData.newPlainText("Imux log", log)
-                )
-            }) { Text("Copy log") }
+            TextButton({ context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(android.content.ClipData.newPlainText("Imux log", log)) }) { Text("Copy log") }
         }, dismissButton = { TextButton(onDismiss) { Text("Close") } }
     )
 }
