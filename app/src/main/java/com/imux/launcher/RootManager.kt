@@ -25,19 +25,6 @@ object RootManager {
         error("Root permission was denied or unavailable: $lastError")
     }
 
-    fun probe(): RootInfo {
-        for (provider in suCandidates) {
-            val result = runCatching { runSu(provider, "id -u") }.getOrNull() ?: continue
-            val uid = result.output.lineSequence().map { it.trim() }.lastOrNull { it.isNotEmpty() }.orEmpty()
-            return if (result.exitCode == 0 && uid == "0") {
-                RootInfo(true, provider, "uid=0")
-            } else {
-                RootInfo(false, provider, result.output.ifBlank { "permission denied" })
-            }
-        }
-        return RootInfo(false, "none", "su executable not found")
-    }
-
     fun exec(command: String): Result<String> = runCatching {
         var lastError = "su executable was not found"
         for (provider in suCandidates) {
@@ -64,6 +51,4 @@ object RootManager {
         val output = BufferedReader(InputStreamReader(process.inputStream)).use { it.readText() }
         return SuResult(process.exitValue(), output)
     }
-
-    data class RootInfo(val granted: Boolean, val provider: String, val detail: String)
 }
