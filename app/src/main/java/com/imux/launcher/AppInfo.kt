@@ -2,9 +2,12 @@ package com.imux.launcher
 
 import android.graphics.drawable.Drawable
 
- data class AppInfo(
+/** Lightweight app metadata. The icon is resolved only when a cell actually needs it. */
+data class AppInfo(
     val label: String,
     val packageName: String,
-    val icon: Drawable,
+    private val iconLoader: () -> Drawable,
     val launch: () -> Unit
-)
+) {
+    val icon: Drawable by lazy(LazyThreadSafetyMode.NONE) { iconLoader() }
+}
