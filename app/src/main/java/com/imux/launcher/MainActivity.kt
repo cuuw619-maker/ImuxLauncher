@@ -9,8 +9,6 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.View
-import android.widget.ImageView
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -23,6 +21,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -71,10 +70,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -110,8 +110,8 @@ class MainActivity : ComponentActivity() {
             prefs.getBoolean("root_granted_session", false)
         ) {
             Thread {
-                VivoLauncherManager.suppressStockLauncher().onSuccess {
-                    CrashLogger.log(this, "INFO", "Vivo compatibility: stock launcher force-stopped")
+                VivoLauncherManager.enforceImuxHome().onSuccess {
+                    CrashLogger.log(this, "INFO", "Vivo compatibility: Imux HOME role enforced")
                 }.onFailure {
                     CrashLogger.log(this, "WARN", "Vivo compatibility failed: ${it.message}")
                 }
@@ -124,13 +124,18 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
             CrashLogger.log(this, "INFO", "HOME intent received by Imux")
+            if (prefs.getBoolean("vivo_compat_mode", false) &&
+                prefs.getBoolean("root_granted_session", false)
+            ) {
+                Thread { VivoLauncherManager.enforceImuxHome() }.start()
+            }
         }
     }
 
     private fun loadApps(): List<AppInfo> = runCatching {
         val pm = packageManager
         val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        pm.queryIntentActivities(query, PackageManager.MATCH_ALL)
+        pm.queryIntentActivities(query, PackageManager.MATCH_DEFAULT_ONLY)
             .distinctBy { it.activityInfo.packageName }
             .map { info ->
                 AppInfo(
@@ -173,6 +178,9 @@ class MainActivity : ComponentActivity() {
             val result = RootManager.requestRoot()
             if (result.isSuccess) {
                 prefs.edit().putBoolean("root_granted_session", true).apply()
+                if (prefs.getBoolean("vivo_compat_mode", false)) {
+                    VivoLauncherManager.enforceImuxHome()
+                }
             }
             runOnUiThread { callback(result) }
         }.start()
@@ -203,7 +211,9 @@ private fun ImuxHome(
         apps = withContext(Dispatchers.Default) { loadApps() }
     }
 
-    val pages = apps.chunked(28).ifEmpty { listOf(emptyList()) }
+    val pages = remember(apps) {
+        apps.chunked(28).ifEmpty { listOf(emptyList()) }
+    }
     val pager = rememberPagerState(pageCount = { pages.size })
 
     BackHandler(enabled = backProtection && (drawerOpen || settingsOpen || logsOpen)) {
@@ -269,7 +279,7 @@ private fun ImuxHome(
                     items(pageApps, key = { it.packageName }) { app ->
                         AppCell(app) {
                             scope.launch {
-                                delay(65)
+                                delay(45)
                                 app.launch()
                             }
                         }
@@ -331,7 +341,7 @@ private fun ImuxHome(
                             AppCell(app) {
                                 drawerOpen = false
                                 scope.launch {
-                                    delay(65)
+                                    delay(45)
                                     app.launch()
                                 }
                             }
@@ -359,7 +369,11 @@ private fun ImuxHome(
                     vivoCompat = it
                     VivoLauncherManager.setEnabled(context, it)
                     if (it && prefs.getBoolean("root_granted_session", false)) {
-                        Thread { VivoLauncherManager.suppressStockLauncher() }.start()
+                        Thread {
+                            VivoLauncherManager.enforceImuxHome().onFailure { error ->
+                                CrashLogger.log(context, "WARN", "Vivo compatibility enable failed: ${error.message}")
+                            }
+                        }.start()
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -460,16 +474,24 @@ private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center
     ) {
-        AndroidView(
-            factory = { context ->
-                ImageView(context).apply {
-                    scaleType = ImageView.ScaleType.CENTER_INSIDE
-                    importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
-                }
-            },
-            update = { it.setImageDrawable(app.icon) },
-            modifier = Modifier.size(52.dp)
-        )
+        // Compose Canvas is substantially lighter than creating an Android View per icon.
+        Canvas(modifier = Modifier.size(52.dp)) {
+            val drawable = app.icon
+            val intrinsicWidth = drawable.intrinsicWidth.coerceAtLeast(1)
+            val intrinsicHeight = drawable.intrinsicHeight.coerceAtLeast(1)
+            val scaleFactor = minOf(size.width / intrinsicWidth, size.height / intrinsicHeight)
+            val drawWidth = intrinsicWidth * scaleFactor
+            val drawHeight = intrinsicHeight * scaleFactor
+            val left = ((size.width - drawWidth) / 2f).toInt()
+            val top = ((size.height - drawHeight) / 2f).toInt()
+            drawable.setBounds(
+                left,
+                top,
+                (left + drawWidth).toInt(),
+                (top + drawHeight).toInt()
+            )
+            drawIntoCanvas { canvas -> drawable.draw(canvas.nativeCanvas) }
+        }
         Spacer(Modifier.height(4.dp))
         Text(
             text = app.label,
