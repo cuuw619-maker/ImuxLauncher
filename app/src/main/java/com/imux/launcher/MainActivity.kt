@@ -4,417 +4,234 @@ import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.view.Gravity
-import android.view.View
-import android.view.ViewGroup
-import android.view.animation.AccelerateDecelerateInterpolator
-import android.view.animation.DecelerateInterpolator
-import android.widget.Button
-import android.widget.CheckBox
-import android.widget.EditText
-import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.ScrollView
-import android.widget.TextView
-import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.appcompat.app.AppCompatActivity
-import androidx.core.widget.addTextChangedListener
-import androidx.viewpager2.widget.ViewPager2
-import java.util.concurrent.Executors
+import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.getSystemService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
-class MainActivity : AppCompatActivity() {
-    private val executor = Executors.newSingleThreadExecutor()
+class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
-
-    private lateinit var rootStatus: TextView
-    private lateinit var rootButton: Button
-    private lateinit var desktop: GestureFrameLayout
-    private lateinit var desktopPager: ViewPager2
-    private lateinit var pageIndicator: TextView
-    private lateinit var drawer: LinearLayout
-    private lateinit var drawerSearch: EditText
-    private lateinit var drawerAdapter: AppAdapter
-    private lateinit var drawerCount: TextView
-    private lateinit var workspaceAdapter: WorkspacePageAdapter
-
-    private var allApps: List<AppInfo> = emptyList()
-    private var rootGranted = false
-    private var launchingApp = false
-
-    private val homeRoleLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        updateHomeStatus()
-    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        configureWindow()
-        configureBackProtection()
-        if (prefs.getBoolean("setup_complete", false)) showDesktop() else showSetup()
-        loadApps()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        if (::desktopPager.isInitialized) {
-            launchingApp = false
-            loadApps()
-        }
-    }
-
-    override fun onUserLeaveHint() {
-        super.onUserLeaveHint()
-        if (!prefs.getBoolean("protect_desktop", true) || launchingApp) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = getSystemService(RoleManager::class.java)
-            if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) &&
-                roleManager.isRoleHeld(RoleManager.ROLE_HOME)
-            ) {
-                desktop.postDelayed({
-                    if (!isFinishing && !launchingApp) {
-                        val homeIntent = Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                        }
-                        startActivity(homeIntent)
-                    }
-                }, 100L)
-            }
-        }
-    }
-
-    private fun configureWindow() {
-        window.statusBarColor = Color.TRANSPARENT
-        window.navigationBarColor = Color.TRANSPARENT
-        window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
-            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
-            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-    }
-
-    private fun configureBackProtection() {
+        CrashLogger.log(this, "INFO", "MainActivity created; desktop mode")
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (::drawer.isInitialized && drawer.visibility == View.VISIBLE) {
-                    closeDrawer()
-                    return
-                }
-                if (prefs.getBoolean("protect_desktop", true) && prefs.getBoolean("setup_complete", false)) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Imux desktop is protected. Disable protection in setup to exit with Back.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else {
-                    isEnabled = false
-                    onBackPressedDispatcher.onBackPressed()
-                }
+                CrashLogger.log(this@MainActivity, "INFO", "Back pressed; launcher remains active")
             }
         })
-    }
-
-    private fun showSetup() {
-        val scroll = ScrollView(this)
-        val setup = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(30), dp(64), dp(30), dp(40))
-            setBackgroundColor(Color.rgb(10, 10, 14))
-        }
-        setup.addView(TextView(this).apply {
-            text = "IMUX"
-            textSize = 42f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }, matchWrap())
-        setup.addView(TextView(this).apply {
-            text = "Launcher application"
-            textSize = 20f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, dp(4), 0, dp(30))
-        }, matchWrap())
-        setup.addView(TextView(this).apply {
-            text = "Imux is a normal Android application. It appears in the regular app list and can optionally be assigned the HOME role. Root is requested only through the installed su provider, including SukiSU-Ultra."
-            textSize = 15f
-            setTextColor(Color.GRAY)
-            setPadding(0, 0, 0, dp(20))
-        }, matchWrap())
-        rootStatus = TextView(this).apply {
-            text = "Root: not requested"
-            textSize = 16f
-            setTextColor(Color.LTGRAY)
-            setPadding(0, 0, 0, dp(12))
-        }
-        setup.addView(rootStatus, matchWrap())
-        rootButton = Button(this).apply {
-            text = "Provide root"
-            isAllCaps = false
-            setOnClickListener { requestRoot() }
-        }
-        setup.addView(rootButton, matchWrap())
-        val swipeToggle = CheckBox(this).apply {
-            text = "Enable swipe-up app drawer"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("swipe_drawer", false)
-            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("swipe_drawer", checked).apply() }
-        }
-        setup.addView(swipeToggle, matchWrap().apply { topMargin = dp(16) })
-        val protectionToggle = CheckBox(this).apply {
-            text = "Protect desktop from Back / HOME-role exit"
-            setTextColor(Color.WHITE)
-            isChecked = prefs.getBoolean("protect_desktop", true)
-            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("protect_desktop", checked).apply() }
-        }
-        setup.addView(protectionToggle, matchWrap().apply { topMargin = dp(8) })
-        setup.addView(TextView(this).apply {
-            text = "Workspace: unlimited pages of 4 columns × 7 rows (28 icons per page). Swipe horizontally between pages. The initial swipe-up drawer remains disabled."
-            textSize = 14f
-            setTextColor(Color.GRAY)
-            setPadding(0, dp(4), 0, dp(18))
-        }, matchWrap())
-        setup.addView(Button(this).apply {
-            text = "Set Imux as default launcher"
-            isAllCaps = false
-            setOnClickListener { requestDefaultLauncher() }
-        }, matchWrap())
-        setup.addView(Button(this).apply {
-            text = "Enter desktop"
-            isAllCaps = false
-            setOnClickListener {
-                prefs.edit().putBoolean("setup_complete", true).apply()
-                showDesktop()
-            }
-        }, matchWrap().apply { topMargin = dp(10) })
-        scroll.addView(setup)
-        setContentView(scroll)
-        updateHomeStatus()
-    }
-
-    private fun updateHomeStatus() {
-        if (!::rootStatus.isInitialized) return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = getSystemService(RoleManager::class.java)
-            if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
-                rootStatus.text = when {
-                    roleManager.isRoleHeld(RoleManager.ROLE_HOME) && rootGranted -> "Root: granted · Imux is default launcher"
-                    roleManager.isRoleHeld(RoleManager.ROLE_HOME) -> "Root: not requested · Imux is default launcher"
-                    rootGranted -> "Root: granted · Imux is not default launcher"
-                    else -> "Root: not requested · Imux is not default launcher"
-                }
+        setContent {
+            val dark = androidx.compose.foundation.isSystemInDarkTheme()
+            val scheme = if (Build.VERSION.SDK_INT >= 31) {
+                if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)
+            } else if (dark) darkColorScheme() else lightColorScheme()
+            MaterialTheme(colorScheme = scheme) {
+                ImuxHome(prefs = prefs, loadApps = ::loadApps, requestHome = ::requestDefaultLauncher, requestRoot = ::requestRoot)
             }
         }
     }
 
-    private fun requestDefaultLauncher() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = getSystemService(RoleManager::class.java)
-            if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
-                homeRoleLauncher.launch(roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME))
-                return
-            }
-        }
-        runCatching { startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) }
-    }
-
-    private fun showDesktop() {
-        desktop = GestureFrameLayout(this).apply {
-            setBackgroundColor(Color.rgb(8, 9, 13))
-            onSwipeUp = { if (prefs.getBoolean("swipe_drawer", false)) openDrawer() }
-            onSwipeDown = { if (::drawer.isInitialized && drawer.visibility == View.VISIBLE) closeDrawer() }
-        }
-        val shell = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(10), dp(28), dp(10), dp(8))
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(8), 0, dp(8), dp(8))
-        }
-        header.addView(TextView(this).apply {
-            text = "IMUX"
-            textSize = 18f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        pageIndicator = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.GRAY)
-            gravity = Gravity.CENTER
-        }
-        header.addView(pageIndicator, LinearLayout.LayoutParams(dp(64), -2))
-        shell.addView(header, matchWrap())
-        desktopPager = ViewPager2(this).apply {
-            orientation = ViewPager2.ORIENTATION_HORIZONTAL
-            offscreenPageLimit = 1
-            isUserInputEnabled = true
-            setPageTransformer { page, position ->
-                page.alpha = 0.78f + (1f - kotlin.math.abs(position)).coerceIn(0f, 1f) * 0.22f
-                page.translationX = -position * dp(8)
-            }
-        }
-        workspaceAdapter = WorkspacePageAdapter(emptyList())
-        desktopPager.adapter = workspaceAdapter
-        desktopPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
-            override fun onPageSelected(position: Int) { updatePageIndicator(position) }
-        })
-        shell.addView(desktopPager, LinearLayout.LayoutParams(-1, 0, 1f))
-        shell.addView(TextView(this).apply {
-            text = if (prefs.getBoolean("swipe_drawer", false)) "Swipe up for all apps" else ""
-            textSize = 12f
-            setTextColor(Color.DKGRAY)
-            gravity = Gravity.CENTER
-            setPadding(0, dp(4), 0, dp(2))
-        }, matchWrap())
-        desktop.addView(shell, FrameLayout.LayoutParams(-1, -1))
-        buildDrawer()
-        setContentView(desktop)
-        refreshDesktop()
-    }
-
-    private fun updatePageIndicator(position: Int) {
-        if (!::pageIndicator.isInitialized) return
-        val count = workspaceAdapter.itemCount.coerceAtLeast(1)
-        pageIndicator.text = "${position.coerceIn(0, count - 1) + 1} / $count"
-    }
-
-    private fun buildDrawer() {
-        drawer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(30), dp(18), dp(10))
-            setBackgroundColor(Color.rgb(12, 13, 18))
-            visibility = View.GONE
-            alpha = 0f
-            scaleX = 0.985f
-            scaleY = 0.985f
-        }
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        header.addView(TextView(this@MainActivity).apply {
-            text = "All apps"
-            textSize = 28f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-        }, LinearLayout.LayoutParams(0, -2, 1f))
-        drawerCount = TextView(this).apply { textSize = 13f; setTextColor(Color.GRAY) }
-        header.addView(drawerCount)
-        drawer.addView(header, matchWrap())
-        drawerSearch = EditText(this).apply {
-            hint = "Search applications"
-            setSingleLine(true)
-            setTextColor(Color.WHITE)
-            setHintTextColor(Color.GRAY)
-            addTextChangedListener { filterDrawer(it?.toString().orEmpty()) }
-        }
-        drawer.addView(drawerSearch, matchWrap().apply { topMargin = dp(10); bottomMargin = dp(8) })
-        val list = androidx.recyclerview.widget.RecyclerView(this).apply {
-            layoutManager = androidx.recyclerview.widget.GridLayoutManager(this@MainActivity, 4)
-            itemAnimator = null
-            overScrollMode = View.OVER_SCROLL_NEVER
-        }
-        drawerAdapter = AppAdapter(emptyList(), grid = true)
-        list.adapter = drawerAdapter
-        drawer.addView(list, LinearLayout.LayoutParams(-1, 0, 1f))
-        desktop.addView(drawer, FrameLayout.LayoutParams(-1, -1))
-    }
-
-    private fun refreshDesktop() {
-        if (!::workspaceAdapter.isInitialized) return
-        workspaceAdapter.submitApps(allApps)
-        updatePageIndicator(desktopPager.currentItem)
-        if (::drawerSearch.isInitialized) filterDrawer(drawerSearch.text?.toString().orEmpty())
-    }
-
-    private fun openDrawer() {
-        if (!::drawer.isInitialized || drawer.visibility == View.VISIBLE) return
-        filterDrawer(drawerSearch.text?.toString().orEmpty())
-        drawer.animate().cancel()
-        drawer.visibility = View.VISIBLE
-        drawer.translationY = resources.displayMetrics.heightPixels * 0.16f
-        drawer.alpha = 0f
-        drawer.scaleX = 0.985f
-        drawer.scaleY = 0.985f
-        drawer.animate().translationY(0f).alpha(1f).scaleX(1f).scaleY(1f)
-            .setDuration(300).setInterpolator(DecelerateInterpolator(1.6f)).start()
-    }
-
-    private fun closeDrawer() {
-        if (!::drawer.isInitialized || drawer.visibility != View.VISIBLE) return
-        drawer.animate().cancel()
-        drawer.animate().translationY(resources.displayMetrics.heightPixels * 0.12f)
-            .alpha(0f).scaleX(0.985f).scaleY(0.985f).setDuration(220)
-            .setInterpolator(AccelerateDecelerateInterpolator()).withEndAction {
-                drawer.visibility = View.GONE
-                drawer.translationY = 0f
-                drawer.alpha = 0f
-                drawer.scaleX = 0.985f
-                drawer.scaleY = 0.985f
-            }.start()
-    }
-
-    private fun filterDrawer(query: String) {
-        if (!::drawerAdapter.isInitialized) return
-        val normalized = query.trim().lowercase()
-        val filtered = if (normalized.isEmpty()) allApps else allApps.filter {
-            it.label.lowercase().contains(normalized) || it.packageName.lowercase().contains(normalized)
-        }
-        drawerAdapter.submitList(filtered)
-        drawerCount.text = "${filtered.size}"
-    }
-
-    private fun loadApps() {
-        executor.execute {
-            val pm = packageManager
-            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-            val list = resolved.distinctBy { it.activityInfo.packageName }.mapNotNull { info ->
-                val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName)
-                    ?: return@mapNotNull null
+    private fun loadApps(): List<AppInfo> = runCatching {
+        val pm = packageManager
+        val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        pm.queryIntentActivities(query, PackageManager.MATCH_ALL)
+            .distinctBy { it.activityInfo.packageName }
+            .mapNotNull { info ->
+                val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName) ?: return@mapNotNull null
                 AppInfo(
-                    label = info.loadLabel(pm).toString(),
-                    packageName = info.activityInfo.packageName,
-                    icon = info.loadIcon(pm),
+                    info.loadLabel(pm).toString(), info.activityInfo.packageName, info.loadIcon(pm),
                     launch = {
-                        launchingApp = true
-                        launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        runCatching { startActivity(launchIntent) }
-                        desktop.postDelayed({ launchingApp = false }, 1200L)
+                        CrashLogger.log(this, "INFO", "Launching ${info.activityInfo.packageName}")
+                        runCatching { startActivity(launchIntent) }.onFailure {
+                            CrashLogger.log(this, "ERROR", "Launch failed: ${it.stackTraceToString()}")
+                        }
                     }
                 )
-            }.sortedBy { it.label.lowercase() }
-            runOnUiThread {
-                allApps = list
-                refreshDesktop()
-                if (::rootStatus.isInitialized) updateHomeStatus()
+            }.sortedBy { it.label.lowercase(Locale.getDefault()) }
+    }.onFailure { CrashLogger.log(this, "ERROR", "App scan failed: ${it.stackTraceToString()}") }
+        .getOrDefault(emptyList())
+
+    private fun requestDefaultLauncher() = runCatching {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val role = getSystemService<RoleManager>()
+            if (role?.isRoleAvailable(RoleManager.ROLE_HOME) == true) {
+                startActivity(role.createRequestRoleIntent(RoleManager.ROLE_HOME)); return
             }
         }
-    }
+        startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+    }.onFailure { CrashLogger.log(this, "ERROR", "HOME role request failed: ${it.stackTraceToString()}") }
 
     private fun requestRoot() {
-        rootButton.isEnabled = false
-        rootStatus.text = "Root: requesting through su…"
-        executor.execute {
+        Thread {
             val result = RootManager.requestRoot()
-            runOnUiThread {
-                rootGranted = result.isSuccess
-                rootStatus.text = if (rootGranted) "Root: granted through ${result.getOrNull() ?: "su"}" else "Root: denied / unavailable"
-                rootButton.text = if (rootGranted) "Root granted" else "Provide root again"
-                rootButton.isEnabled = !rootGranted
+            CrashLogger.log(this, if (result.isSuccess) "INFO" else "WARN", "Root: ${result.fold({ "granted via $it" }, { it.message ?: "denied" })}")
+        }.start()
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun ImuxHome(
+    prefs: android.content.SharedPreferences,
+    loadApps: () -> List<AppInfo>,
+    requestHome: () -> Unit,
+    requestRoot: () -> Unit
+) {
+    var apps by remember { mutableStateOf(emptyList<AppInfo>()) }
+    var drawer by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
+    var search by remember { mutableStateOf("") }
+    var logs by remember { mutableStateOf(false) }
+    var drawerEnabled by remember { mutableStateOf(prefs.getBoolean("swipe_drawer", false)) }
+    var protect by remember { mutableStateOf(prefs.getBoolean("protect_desktop", true)) }
+
+    LaunchedEffect(Unit) { apps = withContext(Dispatchers.Default) { loadApps() } }
+    val pages = apps.chunked(28).ifEmpty { listOf(emptyList()) }
+    val pager = rememberPagerState(pageCount = { pages.size })
+    val filtered = if (search.isBlank()) apps else apps.filter { it.label.contains(search, true) || it.packageName.contains(search, true) }
+
+    Box(
+        Modifier.fillMaxSize().pointerInput(drawerEnabled, drawer) {
+            if (drawerEnabled && !drawer) detectVerticalDragGestures { _, dy -> if (dy < -36f) drawer = true }
+        }
+    ) {
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                Surface(tonalElevation = 2.dp) {
+                    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("IMUX", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                            Text("${pager.currentPage + 1} / ${pages.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton({ settings = true }) { Icon(Icons.Default.Settings, "Settings") }
+                    }
+                }
+            },
+            floatingActionButton = { FloatingActionButton({ drawer = true }) { Icon(Icons.Default.Apps, "All apps") } }
+        ) { pad ->
+            HorizontalPager(
+                state = pager, modifier = Modifier.fillMaxSize().padding(pad),
+                contentPadding = PaddingValues(horizontal = 10.dp), pageSpacing = 8.dp
+            ) { page ->
+                val pageApps = pages[page]
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4), modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(4.dp, 10.dp, 4.dp, 88.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    items(pageApps, key = { it.packageName }) { AppCell(it) }
+                    items(28 - pageApps.size) { Spacer(Modifier.aspectRatio(.78f)) }
+                }
             }
         }
+
+        AnimatedVisibility(drawer, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
+            Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 8.dp) {
+                Column(Modifier.fillMaxSize().padding(20.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("All apps", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+                            Text("${filtered.size} applications", style = MaterialTheme.typography.bodyMedium)
+                        }
+                        IconButton({ drawer = false; search = "" }) { Icon(Icons.Default.Close, "Close") }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search applications") })
+                    Spacer(Modifier.height(10.dp))
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4), contentPadding = PaddingValues(bottom = 20.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) { items(filtered, key = { it.packageName }) { AppCell(it) { drawer = false } } }
+                }
+            }
+        }
+
+        if (settings) {
+            ModalBottomSheet({ settings = false }) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 30.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("Imux settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    SettingRow("Swipe-up app drawer", drawerEnabled) { drawerEnabled = it; prefs.edit().putBoolean("swipe_drawer", it).apply() }
+                    SettingRow("Protect desktop from Back", protect) { protect = it; prefs.edit().putBoolean("protect_desktop", it).apply() }
+                    Button(requestHome, Modifier.fillMaxWidth()) { Text("Set Imux as default launcher") }
+                    OutlinedButton(requestRoot, Modifier.fillMaxWidth()) { Icon(Icons.Default.Shield, null); Spacer(Modifier.width(8.dp)); Text("Request root via su") }
+                    OutlinedButton({ settings = false; logs = true }, Modifier.fillMaxWidth()) { Text("Diagnostics and logs") }
+                    Text("Material You / Material 3 dynamic color is used where Android supports it. The workspace remains 4 × 7 cells per page.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+        if (logs) LogDialog { logs = false }
     }
+}
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
-
-    private fun matchWrap() = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-
-    override fun onDestroy() {
-        executor.shutdownNow()
-        super.onDestroy()
+@Composable
+private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
+    Card(
+        onClick = { onLaunch(); app.launch() }, modifier = Modifier.fillMaxWidth().aspectRatio(.78f),
+        shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
+    ) {
+        Column(Modifier.fillMaxSize().padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            AndroidView({ context -> android.widget.ImageView(context).apply { scaleType = android.widget.ImageView.ScaleType.FIT_CENTER } }, update = { it.setImageDrawable(app.icon) }, modifier = Modifier.size(50.dp))
+            Spacer(Modifier.height(5.dp)); Text(app.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+        }
     }
+}
+
+@Composable
+private fun SettingRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, Modifier.weight(1f)); Switch(checked, onChange)
+        }
+    }
+}
+
+@Composable
+private fun LogDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val log = remember { CrashLogger.read(context) }
+    AlertDialog(
+        onDismissRequest = onDismiss, title = { Text("Imux diagnostics") },
+        text = { Text(log, style = MaterialTheme.typography.bodySmall) },
+        confirmButton = {
+            TextButton({
+                context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(
+                    android.content.ClipData.newPlainText("Imux log", log)
+                )
+            }) { Text("Copy log") }
+        }, dismissButton = { TextButton(onDismiss) { Text("Close") } }
+    )
 }
