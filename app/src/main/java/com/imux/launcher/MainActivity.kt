@@ -13,7 +13,6 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.animation.AccelerateDecelerateInterpolator
-import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.CheckBox
@@ -27,8 +26,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.addTextChangedListener
-import androidx.recyclerview.widget.GridLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import androidx.viewpager2.widget.ViewPager2
 import java.util.concurrent.Executors
 
 class MainActivity : AppCompatActivity() {
@@ -38,16 +36,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var rootStatus: TextView
     private lateinit var rootButton: Button
     private lateinit var desktop: GestureFrameLayout
-    private lateinit var desktopApps: RecyclerView
+    private lateinit var desktopPager: ViewPager2
+    private lateinit var pageIndicator: TextView
     private lateinit var drawer: LinearLayout
     private lateinit var drawerSearch: EditText
     private lateinit var drawerAdapter: AppAdapter
     private lateinit var drawerCount: TextView
-    private lateinit var desktopAdapter: AppAdapter
-    private lateinit var desktopCount: TextView
+    private lateinit var workspaceAdapter: WorkspacePageAdapter
 
     private var allApps: List<AppInfo> = emptyList()
     private var rootGranted = false
+    private var launchingApp = false
 
     private val homeRoleLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         updateHomeStatus()
@@ -63,7 +62,34 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::desktop.isInitialized) loadApps()
+        if (::desktopPager.isInitialized) {
+            launchingApp = false
+            loadApps()
+        }
+    }
+
+    /**
+     * A launcher cannot consume Android's system navigation gesture itself.
+     * When Imux owns ROLE_HOME, however, Android should return to this task
+     * instead of treating the gesture as an ordinary app exit. This callback
+     * only brings Imux back for an actual HOME-role handoff; normal app launches
+     * set launchingApp first and are therefore not interrupted.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (!prefs.getBoolean("protect_desktop", true) || launchingApp) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val roleManager = getSystemService(RoleManager::class.java)
+            if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) &&
+                roleManager.isRoleHeld(RoleManager.ROLE_HOME)
+            ) {
+                desktop.postDelayed({
+                    if (!isFinishing && !launchingApp) {
+                        moveTaskToFront(true)
+                    }
+                }, 80L)
+            }
+        }
     }
 
     private fun configureWindow() {
@@ -81,7 +107,6 @@ class MainActivity : AppCompatActivity() {
                     closeDrawer()
                     return
                 }
-
                 if (prefs.getBoolean("protect_desktop", true) && prefs.getBoolean("setup_complete", false)) {
                     Toast.makeText(
                         this@MainActivity,
@@ -119,7 +144,7 @@ class MainActivity : AppCompatActivity() {
         }, matchWrap())
 
         setup.addView(TextView(this).apply {
-            text = "Imux is a normal Android application. It has its own app icon and can be opened from the regular Android desktop. Root is optional and is requested only when you press the button. Imux never silently assigns itself the HOME role."
+            text = "Imux is a normal Android application. It appears in the regular app list and can optionally be assigned the HOME role. Root is requested only through the installed su provider, including SukiSU-Ultra."
             textSize = 15f
             setTextColor(Color.GRAY)
             setPadding(0, 0, 0, dp(20))
@@ -149,7 +174,7 @@ class MainActivity : AppCompatActivity() {
         setup.addView(swipeToggle, matchWrap().apply { topMargin = dp(16) })
 
         val protectionToggle = CheckBox(this).apply {
-            text = "Protect desktop from Back exit"
+            text = "Protect desktop from Back / HOME-role exit"
             setTextColor(Color.WHITE)
             isChecked = prefs.getBoolean("protect_desktop", true)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("protect_desktop", checked).apply() }
@@ -157,7 +182,7 @@ class MainActivity : AppCompatActivity() {
         setup.addView(protectionToggle, matchWrap().apply { topMargin = dp(8) })
 
         setup.addView(TextView(this).apply {
-            text = "Default desktop: 4 columns × 7 rows (28 slots). Icon metrics follow Launcher3-style phone profiles: approximately 54dp image size and 13sp labels. The app drawer gesture is disabled by default."
+            text = "Workspace: unlimited pages of 4 columns × 7 rows (28 icons per page). Swipe horizontally between pages. The initial swipe-up drawer remains disabled."
             textSize = 14f
             setTextColor(Color.GRAY)
             setPadding(0, dp(4), 0, dp(18))
@@ -236,23 +261,31 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        desktopCount = TextView(this).apply {
+        pageIndicator = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.GRAY)
+            gravity = Gravity.CENTER
         }
-        header.addView(desktopCount)
+        header.addView(pageIndicator, LinearLayout.LayoutParams(dp(64), -2))
         shell.addView(header, matchWrap())
 
-        desktopApps = RecyclerView(this).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, 4)
-            itemAnimator = null
-            overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-            clipToPadding = false
+        desktopPager = ViewPager2(this).apply {
+            orientation = ViewPager2.ORIENTATION_HORIZONTAL
+            offscreenPageLimit = 1
+            isUserInputEnabled = true
+            setPageTransformer { page, position ->
+                page.alpha = 0.78f + (1f - kotlin.math.abs(position)).coerceIn(0f, 1f) * 0.22f
+                page.translationX = -position * dp(8)
+            }
         }
-        desktopAdapter = AppAdapter(emptyList(), grid = true)
-        desktopApps.adapter = desktopAdapter
-        shell.addView(desktopApps, LinearLayout.LayoutParams(-1, 0, 1f))
+        workspaceAdapter = WorkspacePageAdapter(emptyList())
+        desktopPager.adapter = workspaceAdapter
+        desktopPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                updatePageIndicator(position)
+            }
+        })
+        shell.addView(desktopPager, LinearLayout.LayoutParams(-1, 0, 1f))
 
         val hint = TextView(this).apply {
             text = if (prefs.getBoolean("swipe_drawer", false)) "Swipe up for all apps" else ""
@@ -267,6 +300,12 @@ class MainActivity : AppCompatActivity() {
         buildDrawer()
         setContentView(desktop)
         refreshDesktop()
+    }
+
+    private fun updatePageIndicator(position: Int) {
+        if (!::pageIndicator.isInitialized) return
+        val count = workspaceAdapter.itemCount.coerceAtLeast(1)
+        pageIndicator.text = if (count == 1) "1 / 1" else "${position + 1} / $count"
     }
 
     private fun buildDrawer() {
@@ -306,12 +345,10 @@ class MainActivity : AppCompatActivity() {
         }
         drawer.addView(drawerSearch, matchWrap().apply { topMargin = dp(10); bottomMargin = dp(8) })
 
-        val list = RecyclerView(this).apply {
-            layoutManager = GridLayoutManager(this@MainActivity, 4)
+        val list = androidx.recyclerview.widget.RecyclerView(this).apply {
+            layoutManager = androidx.recyclerview.widget.GridLayoutManager(this@MainActivity, 4)
             itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(dp(2), dp(2), dp(2), dp(2))
-            clipToPadding = false
         }
         drawerAdapter = AppAdapter(emptyList(), grid = true)
         list.adapter = drawerAdapter
@@ -321,9 +358,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshDesktop() {
-        if (!::desktopAdapter.isInitialized) return
-        desktopAdapter.submitList(allApps.take(28))
-        if (::desktopCount.isInitialized) desktopCount.text = "${allApps.size} apps"
+        if (!::workspaceAdapter.isInitialized) return
+        workspaceAdapter.submitApps(allApps)
+        updatePageIndicator(desktopPager.currentItem)
         if (::drawerSearch.isInitialized) filterDrawer(drawerSearch.text?.toString().orEmpty())
     }
 
@@ -391,8 +428,10 @@ class MainActivity : AppCompatActivity() {
                         packageName = info.activityInfo.packageName,
                         icon = info.loadIcon(pm),
                         launch = {
+                            launchingApp = true
                             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(launchIntent)
+                            runCatching { startActivity(launchIntent) }
+                            desktop.postDelayed({ launchingApp = false }, 1200L)
                         }
                     )
                 }
@@ -408,12 +447,16 @@ class MainActivity : AppCompatActivity() {
 
     private fun requestRoot() {
         rootButton.isEnabled = false
-        rootStatus.text = "Root: requesting permission…"
+        rootStatus.text = "Root: requesting through su…"
         executor.execute {
             val result = RootManager.requestRoot()
             runOnUiThread {
                 rootGranted = result.isSuccess
-                rootStatus.text = if (rootGranted) "Root: granted" else "Root: denied / unavailable"
+                rootStatus.text = if (rootGranted) {
+                    "Root: granted through ${result.getOrNull() ?: "su"}"
+                } else {
+                    "Root: denied / unavailable"
+                }
                 rootButton.text = if (rootGranted) "Root granted" else "Provide root again"
                 rootButton.isEnabled = !rootGranted
             }
