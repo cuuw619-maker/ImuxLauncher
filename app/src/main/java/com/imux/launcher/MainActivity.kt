@@ -1,18 +1,17 @@
 package com.imux.launcher
 
 import android.content.Intent
-import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Bundle
-import android.view.Gravity
-import android.view.View
+import android.view.ViewGroup
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.widget.addTextChangedListener
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import java.util.concurrent.Executors
@@ -21,8 +20,10 @@ class MainActivity : AppCompatActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private lateinit var rootStatus: TextView
     private lateinit var rootButton: Button
-    private lateinit var apps: RecyclerView
+    private lateinit var appCount: TextView
+    private lateinit var search: EditText
     private lateinit var adapter: AppAdapter
+    private var allApps: List<AppInfo> = emptyList()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,11 +32,18 @@ class MainActivity : AppCompatActivity() {
         requestRootAutomatically()
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (::adapter.isInitialized && allApps.isNotEmpty()) loadApps()
+    }
+
     private fun buildUi() {
         window.statusBarColor = Color.TRANSPARENT
+        window.navigationBarColor = Color.BLACK
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 48, 28, 24)
+            setPadding(28, 40, 28, 20)
             setBackgroundColor(Color.rgb(12, 12, 15))
         }
 
@@ -45,71 +53,109 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
         }
-        root.addView(title, LinearLayout.LayoutParams(-1, -2))
+        root.addView(title, matchWrap())
 
         rootStatus = TextView(this).apply {
             text = "Root: checking…"
-            textSize = 15f
+            textSize = 14f
             setTextColor(Color.LTGRAY)
-            setPadding(0, 8, 0, 12)
+            setPadding(0, 6, 0, 8)
         }
-        root.addView(rootStatus)
+        root.addView(rootStatus, matchWrap())
 
         rootButton = Button(this).apply {
             text = "Request root"
+            isAllCaps = false
             setOnClickListener { requestRoot() }
         }
-        root.addView(rootButton, LinearLayout.LayoutParams(-1, -2))
+        root.addView(rootButton, matchWrap())
 
-        val appsTitle = TextView(this).apply {
-            text = "Applications"
-            textSize = 20f
-            typeface = Typeface.DEFAULT_BOLD
+        search = EditText(this).apply {
+            hint = "Search applications"
+            textSize = 16f
+            setSingleLine(true)
             setTextColor(Color.WHITE)
-            setPadding(0, 22, 0, 10)
+            setHintTextColor(Color.GRAY)
+            setPadding(20, 0, 20, 0)
+            addTextChangedListener { editable -> filterApps(editable?.toString().orEmpty()) }
         }
-        root.addView(appsTitle)
+        val searchParams = matchWrap().apply { topMargin = 16 }
+        root.addView(search, searchParams)
 
-        apps = RecyclerView(this).apply {
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            val label = TextView(this@MainActivity).apply {
+                text = "Applications"
+                textSize = 20f
+                typeface = Typeface.DEFAULT_BOLD
+                setTextColor(Color.WHITE)
+            }
+            addView(label, LinearLayout.LayoutParams(0, -2, 1f))
+            appCount = TextView(this@MainActivity).apply {
+                textSize = 14f
+                setTextColor(Color.GRAY)
+                gravity = android.view.Gravity.CENTER_VERTICAL
+            }
+            addView(appCount, LinearLayout.LayoutParams(-2, -2))
+        }
+        root.addView(header, matchWrap().apply { topMargin = 18; bottomMargin = 10 })
+
+        val appsView = RecyclerView(this).apply {
             layoutManager = LinearLayoutManager(this@MainActivity)
             setBackgroundColor(Color.rgb(20, 20, 24))
+            itemAnimator = null
         }
         adapter = AppAdapter(emptyList())
-        apps.adapter = adapter
-        root.addView(apps, LinearLayout.LayoutParams(-1, 0, 1f))
+        appsView.adapter = adapter
+        root.addView(appsView, LinearLayout.LayoutParams(-1, 0, 1f))
 
         setContentView(root)
     }
 
     private fun loadApps() {
-        val pm = packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
-        val list = resolved
-            .filter { it.activityInfo.applicationInfo.flags and ApplicationInfo.FLAG_SYSTEM == 0 || true }
-            .distinctBy { it.activityInfo.packageName }
-            .map { info ->
-                AppInfo(
-                    label = info.loadLabel(pm).toString(),
-                    packageName = info.activityInfo.packageName,
-                    icon = info.loadIcon(pm),
-                    launch = {
-                        val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName)
-                        launchIntent?.let { startActivity(it) }
-                    }
-                )
+        executor.execute {
+            val pm = packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+            val list = resolved
+                .distinctBy { it.activityInfo.packageName }
+                .mapNotNull { info ->
+                    val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName) ?: return@mapNotNull null
+                    AppInfo(
+                        label = info.loadLabel(pm).toString(),
+                        packageName = info.activityInfo.packageName,
+                        icon = info.loadIcon(pm),
+                        launch = {
+                            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(launchIntent)
+                        }
+                    )
+                }
+                .sortedBy { it.label.lowercase() }
+
+            runOnUiThread {
+                allApps = list
+                filterApps(search.text?.toString().orEmpty())
             }
-            .sortedBy { it.label.lowercase() }
-        adapter.submitList(list)
+        }
+    }
+
+    private fun filterApps(query: String) {
+        if (!::adapter.isInitialized) return
+        val normalized = query.trim().lowercase()
+        val filtered = if (normalized.isEmpty()) {
+            allApps
+        } else {
+            allApps.filter {
+                it.label.lowercase().contains(normalized) || it.packageName.lowercase().contains(normalized)
+            }
+        }
+        adapter.submitList(filtered)
+        appCount.text = "${filtered.size} / ${allApps.size}"
     }
 
     private fun requestRootAutomatically() {
-        rootStatus.text = "Root: requesting permission…"
-        rootButton.isEnabled = false
-        executor.execute {
-            val result = RootManager.requestRoot()
-            runOnUiThread { applyRootResult(result) }
-        }
+        requestRoot()
     }
 
     private fun requestRoot() {
@@ -131,6 +177,11 @@ class MainActivity : AppCompatActivity() {
             rootButton.isEnabled = true
         }
     }
+
+    private fun matchWrap() = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT
+    )
 
     override fun onDestroy() {
         executor.shutdownNow()
