@@ -12,6 +12,9 @@ import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.animation.AccelerateDecelerateInterpolator
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
@@ -19,6 +22,8 @@ import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.widget.addTextChangedListener
@@ -39,6 +44,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var drawerAdapter: AppAdapter
     private lateinit var drawerCount: TextView
     private lateinit var desktopAdapter: AppAdapter
+    private lateinit var desktopCount: TextView
 
     private var allApps: List<AppInfo> = emptyList()
     private var rootGranted = false
@@ -50,6 +56,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureWindow()
+        configureBackProtection()
         if (prefs.getBoolean("setup_complete", false)) showDesktop() else showSetup()
         loadApps()
     }
@@ -67,11 +74,33 @@ class MainActivity : AppCompatActivity() {
             View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
     }
 
+    private fun configureBackProtection() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (::drawer.isInitialized && drawer.visibility == View.VISIBLE) {
+                    closeDrawer()
+                    return
+                }
+
+                if (prefs.getBoolean("protect_desktop", true) && prefs.getBoolean("setup_complete", false)) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Imux desktop is protected. Disable protection in setup to exit with Back.",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
+    }
+
     private fun showSetup() {
         val scroll = ScrollView(this)
         val setup = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(30, 64, 30, 40)
+            setPadding(dp(30), dp(64), dp(30), dp(40))
             setBackgroundColor(Color.rgb(10, 10, 14))
         }
 
@@ -86,21 +115,21 @@ class MainActivity : AppCompatActivity() {
             text = "Launcher application"
             textSize = 20f
             setTextColor(Color.LTGRAY)
-            setPadding(0, 4, 0, 30)
+            setPadding(0, dp(4), 0, dp(30))
         }, matchWrap())
 
         setup.addView(TextView(this).apply {
-            text = "Imux is a normal Android application. Root is optional and is requested only when you press the button. Imux does not silently make itself the system launcher."
+            text = "Imux is a normal Android application. It has its own app icon and can be opened from the regular Android desktop. Root is optional and is requested only when you press the button. Imux never silently assigns itself the HOME role."
             textSize = 15f
             setTextColor(Color.GRAY)
-            setPadding(0, 0, 0, 20)
+            setPadding(0, 0, 0, dp(20))
         }, matchWrap())
 
         rootStatus = TextView(this).apply {
             text = "Root: not requested"
             textSize = 16f
             setTextColor(Color.LTGRAY)
-            setPadding(0, 0, 0, 12)
+            setPadding(0, 0, 0, dp(12))
         }
         setup.addView(rootStatus, matchWrap())
 
@@ -117,13 +146,21 @@ class MainActivity : AppCompatActivity() {
             isChecked = prefs.getBoolean("swipe_drawer", false)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("swipe_drawer", checked).apply() }
         }
-        setup.addView(swipeToggle, matchWrap().apply { topMargin = 16 })
+        setup.addView(swipeToggle, matchWrap().apply { topMargin = dp(16) })
+
+        val protectionToggle = CheckBox(this).apply {
+            text = "Protect desktop from Back exit"
+            setTextColor(Color.WHITE)
+            isChecked = prefs.getBoolean("protect_desktop", true)
+            setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean("protect_desktop", checked).apply() }
+        }
+        setup.addView(protectionToggle, matchWrap().apply { topMargin = dp(8) })
 
         setup.addView(TextView(this).apply {
-            text = "Default desktop: 4 columns × 7 rows. The app drawer gesture is disabled by default, so the initial desktop behaves like a normal Android/iOS-style icon grid."
+            text = "Default desktop: 4 columns × 7 rows (28 slots). Icon metrics follow Launcher3-style phone profiles: approximately 54dp image size and 13sp labels. The app drawer gesture is disabled by default."
             textSize = 14f
             setTextColor(Color.GRAY)
-            setPadding(0, 4, 0, 18)
+            setPadding(0, dp(4), 0, dp(18))
         }, matchWrap())
 
         setup.addView(Button(this).apply {
@@ -139,7 +176,7 @@ class MainActivity : AppCompatActivity() {
                 prefs.edit().putBoolean("setup_complete", true).apply()
                 showDesktop()
             }
-        }, matchWrap().apply { topMargin = 10 })
+        }, matchWrap().apply { topMargin = dp(10) })
 
         scroll.addView(setup)
         setContentView(scroll)
@@ -151,12 +188,11 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val roleManager = getSystemService(RoleManager::class.java)
             if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME)) {
-                rootStatus.text = if (roleManager.isRoleHeld(RoleManager.ROLE_HOME)) {
-                    if (rootGranted) "Root: granted · Imux is default launcher"
-                    else "Root: not requested · Imux is default launcher"
-                } else {
-                    if (rootGranted) "Root: granted · Imux is not default launcher"
-                    else "Root: not requested · Imux is not default launcher"
+                rootStatus.text = when {
+                    roleManager.isRoleHeld(RoleManager.ROLE_HOME) && rootGranted -> "Root: granted · Imux is default launcher"
+                    roleManager.isRoleHeld(RoleManager.ROLE_HOME) -> "Root: not requested · Imux is default launcher"
+                    rootGranted -> "Root: granted · Imux is not default launcher"
+                    else -> "Root: not requested · Imux is not default launcher"
                 }
             }
         }
@@ -180,19 +216,19 @@ class MainActivity : AppCompatActivity() {
                 if (prefs.getBoolean("swipe_drawer", false)) openDrawer()
             }
             onSwipeDown = {
-                if (drawer.visibility == View.VISIBLE) closeDrawer()
+                if (::drawer.isInitialized && drawer.visibility == View.VISIBLE) closeDrawer()
             }
         }
 
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(16, 34, 16, 12)
+            setPadding(dp(10), dp(28), dp(10), dp(8))
         }
 
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(8, 0, 8, 12)
+            setPadding(dp(8), 0, dp(8), dp(8))
         }
         header.addView(TextView(this).apply {
             text = "IMUX"
@@ -200,18 +236,18 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        header.addView(TextView(this).apply {
-            text = "${allApps.size} apps"
+        desktopCount = TextView(this).apply {
             textSize = 13f
             setTextColor(Color.GRAY)
-        })
+        }
+        header.addView(desktopCount)
         shell.addView(header, matchWrap())
 
         desktopApps = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, 4)
             itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
-            setPadding(2, 4, 2, 4)
+            setPadding(dp(2), dp(2), dp(2), dp(2))
             clipToPadding = false
         }
         desktopAdapter = AppAdapter(emptyList(), grid = true)
@@ -223,7 +259,7 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             setTextColor(Color.DKGRAY)
             gravity = Gravity.CENTER
-            setPadding(0, 6, 0, 4)
+            setPadding(0, dp(4), 0, dp(2))
         }
         shell.addView(hint, matchWrap())
 
@@ -236,10 +272,12 @@ class MainActivity : AppCompatActivity() {
     private fun buildDrawer() {
         drawer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(18, 34, 18, 12)
+            setPadding(dp(18), dp(30), dp(18), dp(10))
             setBackgroundColor(Color.rgb(12, 13, 18))
             visibility = View.GONE
             alpha = 0f
+            scaleX = 0.985f
+            scaleY = 0.985f
         }
 
         val header = LinearLayout(this).apply {
@@ -252,7 +290,10 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        drawerCount = TextView(this).apply { setTextColor(Color.GRAY) }
+        drawerCount = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.GRAY)
+        }
         header.addView(drawerCount)
         drawer.addView(header, matchWrap())
 
@@ -263,12 +304,14 @@ class MainActivity : AppCompatActivity() {
             setHintTextColor(Color.GRAY)
             addTextChangedListener { filterDrawer(it?.toString().orEmpty()) }
         }
-        drawer.addView(drawerSearch, matchWrap().apply { topMargin = 10; bottomMargin = 8 })
+        drawer.addView(drawerSearch, matchWrap().apply { topMargin = dp(10); bottomMargin = dp(8) })
 
         val list = RecyclerView(this).apply {
             layoutManager = GridLayoutManager(this@MainActivity, 4)
             itemAnimator = null
             overScrollMode = View.OVER_SCROLL_NEVER
+            setPadding(dp(2), dp(2), dp(2), dp(2))
+            clipToPadding = false
         }
         drawerAdapter = AppAdapter(emptyList(), grid = true)
         list.adapter = drawerAdapter
@@ -280,33 +323,45 @@ class MainActivity : AppCompatActivity() {
     private fun refreshDesktop() {
         if (!::desktopAdapter.isInitialized) return
         desktopAdapter.submitList(allApps.take(28))
-        filterDrawer(drawerSearch.text?.toString().orEmpty())
+        if (::desktopCount.isInitialized) desktopCount.text = "${allApps.size} apps"
+        if (::drawerSearch.isInitialized) filterDrawer(drawerSearch.text?.toString().orEmpty())
     }
 
     private fun openDrawer() {
         if (!::drawer.isInitialized || drawer.visibility == View.VISIBLE) return
         filterDrawer(drawerSearch.text?.toString().orEmpty())
+        drawer.animate().cancel()
         drawer.visibility = View.VISIBLE
-        drawer.translationY = drawer.height.toFloat().coerceAtLeast(resources.displayMetrics.heightPixels.toFloat())
+        drawer.translationY = resources.displayMetrics.heightPixels * 0.16f
         drawer.alpha = 0f
+        drawer.scaleX = 0.985f
+        drawer.scaleY = 0.985f
         drawer.animate()
             .translationY(0f)
             .alpha(1f)
-            .setDuration(260)
-            .setInterpolator(android.view.animation.DecelerateInterpolator())
+            .scaleX(1f)
+            .scaleY(1f)
+            .setDuration(300)
+            .setInterpolator(DecelerateInterpolator(1.6f))
             .start()
     }
 
     private fun closeDrawer() {
         if (!::drawer.isInitialized || drawer.visibility != View.VISIBLE) return
+        drawer.animate().cancel()
         drawer.animate()
-            .translationY(drawer.height.toFloat())
+            .translationY(resources.displayMetrics.heightPixels * 0.12f)
             .alpha(0f)
-            .setDuration(210)
-            .setInterpolator(android.view.animation.AccelerateInterpolator())
+            .scaleX(0.985f)
+            .scaleY(0.985f)
+            .setDuration(220)
+            .setInterpolator(AccelerateDecelerateInterpolator())
             .withEndAction {
                 drawer.visibility = View.GONE
                 drawer.translationY = 0f
+                drawer.alpha = 0f
+                drawer.scaleX = 0.985f
+                drawer.scaleY = 0.985f
             }
             .start()
     }
@@ -364,6 +419,8 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()
 
     private fun matchWrap() = LinearLayout.LayoutParams(
         ViewGroup.LayoutParams.MATCH_PARENT,
