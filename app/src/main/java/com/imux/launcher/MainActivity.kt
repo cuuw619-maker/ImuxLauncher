@@ -1,71 +1,31 @@
 package com.imux.launcher
 
 import android.app.role.RoleManager
-import android.content.ClipData
-import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
@@ -77,59 +37,97 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private const val GRID_CELLS = 28
+private const val GRID_COLUMNS = 4
+private const val DOCK_CELLS = 4
+
+/** Small, deterministic animation state machine. 0..0.8 is the opening/closing progress. */
+private class ImuxAnimationEngine {
+    enum class Phase { IDLE, OPENING, READY, CLOSING }
+    var phase by mutableStateOf(Phase.IDLE)
+        private set
+    val progress = Animatable(0f)
+
+    suspend fun open() {
+        phase = Phase.OPENING
+        progress.snapTo(0f)
+        progress.animateTo(.8f, tween(260, easing = FastOutSlowInEasing))
+        phase = Phase.READY
+    }
+
+    suspend fun close() {
+        phase = Phase.CLOSING
+        progress.animateTo(0f, tween(220, easing = FastOutSlowInEasing))
+        phase = Phase.IDLE
+    }
+}
+
+/** Persistent workspace order. New packages are appended; removed packages disappear. */
+private class WorkspaceStore(private val prefs: android.content.SharedPreferences) {
+    private val key = "workspace_order_v2"
+    private val dockKey = "workspace_dock_v2"
+
+    private fun read(key: String) = prefs.getString(key, "")!!.split('|').filter { it.isNotBlank() }
+    private fun write(key: String, value: List<String>) = prefs.edit().putString(key, value.joinToString("|")).apply()
+
+    fun load(all: List<AppInfo>): Pair<List<String>, List<String>> {
+        val valid = all.map { it.packageName }.toSet()
+        var order = read(key).filter(valid::contains).toMutableList()
+        all.forEach { if (it.packageName !in order) order += it.packageName }
+        var dock = read(dockKey).filter(valid::contains).distinct().take(DOCK_CELLS).toMutableList()
+        if (dock.isEmpty()) dock = order.take(DOCK_CELLS).toMutableList()
+        order = order.filterNot { it in dock }.toMutableList()
+        while (order.size < GRID_CELLS) order += ""
+        write(key, order.filter { it.isNotBlank() })
+        write(dockKey, dock)
+        return order.chunked(GRID_CELLS).flatten() to dock
+    }
+
+    fun save(order: List<String>, dock: List<String>) {
+        write(key, order.filter { it.isNotBlank() })
+        write(dockKey, dock.filter { it.isNotBlank() }.take(DOCK_CELLS))
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val prefs by lazy { getSharedPreferences("launcher", Context.MODE_PRIVATE) }
+    private var launching = false
+    private var returnedFromApp = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
-        CrashLogger.log(this, "INFO", "MainActivity created")
+        CrashLogger.log(this, "INFO", "MainActivity created - workspace engine")
         setContent {
             val dark = androidx.compose.foundation.isSystemInDarkTheme()
             val scheme = if (Build.VERSION.SDK_INT >= 31) {
-                if (dark) androidx.compose.material3.dynamicDarkColorScheme(this)
-                else androidx.compose.material3.dynamicLightColorScheme(this)
-            } else if (dark) {
-                androidx.compose.material3.darkColorScheme()
-            } else {
-                androidx.compose.material3.lightColorScheme()
-            }
-            MaterialTheme(colorScheme = scheme) {
-                ImuxHome(prefs, ::loadApps, ::requestDefaultLauncher, ::requestRoot)
-            }
+                if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)
+            } else if (dark) darkColorScheme() else lightColorScheme()
+            MaterialTheme(colorScheme = scheme) { ImuxHome() }
         }
     }
 
     override fun onResume() {
         super.onResume()
-        if (prefs.getBoolean("vivo_compat_mode", false) &&
-            prefs.getBoolean("root_granted_session", false)
-        ) {
-            Thread {
-                VivoLauncherManager.enforceImuxHome().onSuccess {
-                    CrashLogger.log(this, "INFO", "Vivo compatibility: Imux HOME role enforced")
-                }.onFailure {
-                    CrashLogger.log(this, "WARN", "Vivo compatibility failed: ${it.message}")
-                }
-            }.start()
+        if (returnedFromApp) {
+            returnedFromApp = false
+            // The composable owns the visual closing phase; this only records lifecycle return.
+            CrashLogger.log(this, "INFO", "Returned from external application")
         }
+        if (!launching && prefs.getBoolean("vivo_compat_mode", false) && prefs.getBoolean("root_granted_session", false)) {
+            Thread { VivoLauncherManager.enforceImuxHome() }.start()
+        }
+        launching = false
     }
 
-    override fun onNewIntent(intent: Intent) {
-        super.onNewIntent(intent)
-        setIntent(intent)
-        if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
-            CrashLogger.log(this, "INFO", "HOME intent received by Imux")
-            if (prefs.getBoolean("vivo_compat_mode", false) &&
-                prefs.getBoolean("root_granted_session", false)
-            ) {
-                Thread { VivoLauncherManager.enforceImuxHome() }.start()
-            }
-        }
+    private fun launch(app: AppInfo, onStarted: () -> Unit) {
+        launching = true
+        returnedFromApp = true
+        app.launch()
+        onStarted()
     }
 
     private fun loadApps(): List<AppInfo> = runCatching {
@@ -143,413 +141,180 @@ class MainActivity : ComponentActivity() {
                     packageName = info.activityInfo.packageName,
                     iconLoader = { info.loadIcon(pm) },
                     launch = {
-                        val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName)
-                        if (launchIntent != null) {
-                            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            startActivity(launchIntent)
+                        pm.getLaunchIntentForPackage(info.activityInfo.packageName)?.let {
+                            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            startActivity(it)
                         }
                     }
                 )
-            }
-            .sortedBy { it.label.lowercase() }
-    }.getOrElse {
-        CrashLogger.log(this, "ERROR", "Failed to load apps: ${it.stackTraceToString()}")
-        emptyList()
-    }
+            }.sortedBy { it.label.lowercase() }
+    }.getOrElse { emptyList() }
 
     private fun requestDefaultLauncher() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val roleManager = getSystemService(RoleManager::class.java)
-            if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) &&
-                !roleManager.isRoleHeld(RoleManager.ROLE_HOME)
-            ) {
-                startActivityForResult(
-                    roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME),
-                    1001
-                )
-                return
+            val rm = getSystemService(RoleManager::class.java)
+            if (rm.isRoleAvailable(RoleManager.ROLE_HOME) && !rm.isRoleHeld(RoleManager.ROLE_HOME)) {
+                startActivityForResult(rm.createRequestRoleIntent(RoleManager.ROLE_HOME), 1001); return
             }
         }
         startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
     }
 
-    private fun requestRoot(callback: (Result<String>) -> Unit) {
-        Thread {
-            val result = RootManager.requestRoot()
-            if (result.isSuccess) {
-                prefs.edit().putBoolean("root_granted_session", true).apply()
-                if (prefs.getBoolean("vivo_compat_mode", false)) {
-                    VivoLauncherManager.enforceImuxHome()
-                }
-            }
-            runOnUiThread { callback(result) }
-        }.start()
-    }
-}
+    @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
+    @Composable private fun ImuxHome() {
+        val context = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var apps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
+        var workspace by remember { mutableStateOf<List<String>>(emptyList()) }
+        var dock by remember { mutableStateOf<List<String>>(emptyList()) }
+        var settings by remember { mutableStateOf(false) }
+        var logs by remember { mutableStateOf(false) }
+        var swipeDrawer by remember { mutableStateOf(prefs.getBoolean("swipe_drawer", false)) }
+        val engine = remember { ImuxAnimationEngine() }
+        val store = remember { WorkspaceStore(prefs) }
 
-@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
-@Composable
-private fun ImuxHome(
-    prefs: android.content.SharedPreferences,
-    loadApps: () -> List<AppInfo>,
-    requestDefaultLauncher: () -> Unit,
-    requestRoot: ((Result<String>) -> Unit) -> Unit
-) {
-    val context = LocalContext.current
-    var apps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
-    var drawerOpen by remember { mutableStateOf(false) }
-    var settingsOpen by remember { mutableStateOf(false) }
-    var logsOpen by remember { mutableStateOf(false) }
-    var swipeDrawer by remember { mutableStateOf(prefs.getBoolean("swipe_drawer", false)) }
-    var backProtection by remember { mutableStateOf(prefs.getBoolean("back_protection", true)) }
-    var vivoCompat by remember { mutableStateOf(prefs.getBoolean("vivo_compat_mode", false)) }
-    var rootBusy by remember { mutableStateOf(false) }
-    var rootMessage by remember { mutableStateOf("") }
-    val scope = rememberCoroutineScope()
-
-    LaunchedEffect(Unit) {
-        apps = withContext(Dispatchers.Default) { loadApps() }
-    }
-
-    val pages = remember(apps) {
-        apps.chunked(28).ifEmpty { listOf(emptyList()) }
-    }
-    val pager = rememberPagerState(pageCount = { pages.size })
-
-    BackHandler(enabled = backProtection && (drawerOpen || settingsOpen || logsOpen)) {
-        when {
-            logsOpen -> logsOpen = false
-            settingsOpen -> settingsOpen = false
-            drawerOpen -> drawerOpen = false
+        LaunchedEffect(Unit) {
+            apps = withContext(Dispatchers.Default) { loadApps() }
         }
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.surfaceVariant,
-                        MaterialTheme.colorScheme.surface,
-                        MaterialTheme.colorScheme.background
-                    )
-                )
-            )
-            .pointerInput(swipeDrawer) {
-                if (swipeDrawer) {
-                    detectVerticalDragGestures(
-                        onVerticalDrag = { _, dragAmount ->
-                            if (dragAmount < -18f) drawerOpen = true
-                        }
-                    )
-                }
+        LaunchedEffect(apps) {
+            if (apps.isNotEmpty()) {
+                val loaded = store.load(apps)
+                workspace = loaded.first
+                dock = loaded.second
             }
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    val target = if (drawerOpen || settingsOpen) .96f else 1f
-                    scaleX = target
-                    scaleY = target
-                }
-                .padding(horizontal = 10.dp, vertical = 28.dp)
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                horizontalArrangement = Arrangement.End
-            ) {
-                IconButton(onClick = { settingsOpen = true }) {
-                    Icon(Icons.Default.Settings, contentDescription = "Settings")
-                }
-            }
+        }
+        val pages = remember(workspace) { if (workspace.isEmpty()) listOf(List(GRID_CELLS) { "" }) else workspace.chunked(GRID_CELLS) }
+        val pager = rememberPagerState(pageCount = { pages.size })
+        val appMap = remember(apps) { apps.associateBy { it.packageName } }
 
-            HorizontalPager(
-                state = pager,
-                modifier = Modifier.weight(1f).fillMaxWidth()
-            ) { page ->
-                val pageApps = pages[page]
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    modifier = Modifier.fillMaxSize().padding(4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    items(pageApps, key = { it.packageName }) { app ->
-                        AppCell(app) {
+        BackHandler(enabled = engine.phase != ImuxAnimationEngine.Phase.IDLE || settings || logs) {
+            when {
+                logs -> logs = false
+                settings -> settings = false
+                engine.phase != ImuxAnimationEngine.Phase.IDLE -> scope.launch { engine.close() }
+            }
+        }
+
+        Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.background)))) {
+            Column(Modifier.fillMaxSize().padding(top = 26.dp, start = 8.dp, end = 8.dp, bottom = 6.dp)) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    IconButton(onClick = { settings = true }) { Icon(Icons.Default.Settings, "Settings") }
+                }
+                HorizontalPager(state = pager, modifier = Modifier.weight(1f)) { page ->
+                    WorkspaceGrid(
+                        items = pages[page],
+                        appMap = appMap,
+                        onMove = { from, to ->
+                            val base = workspace.toMutableList()
+                            val a = page * GRID_CELLS + from
+                            val b = page * GRID_CELLS + to
+                            if (a in base.indices && b in base.indices) {
+                                val x = base[a]; base[a] = base[b]; base[b] = x
+                                workspace = base
+                                store.save(base, dock)
+                            }
+                        },
+                        onLaunch = { app ->
                             scope.launch {
-                                delay(45)
-                                app.launch()
+                                engine.open()
+                                if (engine.phase == ImuxAnimationEngine.Phase.READY) launch(app) { }
                             }
                         }
-                    }
-                }
-            }
-
-            if (pages.size > 1) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        "${pager.currentPage + 1} / ${pages.size}",
-                        style = MaterialTheme.typography.labelMedium
                     )
                 }
+                Dock(dock, appMap) { app -> scope.launch { engine.open(); if (engine.phase == ImuxAnimationEngine.Phase.READY) launch(app) {} } }
+                if (pages.size > 1) Text("${pager.currentPage + 1} / ${pages.size}", Modifier.align(Alignment.CenterHorizontally), style = MaterialTheme.typography.labelSmall)
+            }
+
+            if (engine.phase != ImuxAnimationEngine.Phase.IDLE) {
+                Box(Modifier.fillMaxSize().graphicsLayer {
+                    val p = engine.progress.value
+                    scaleX = 1f - p * .035f; scaleY = 1f - p * .035f
+                    alpha = 1f - p * .12f
+                })
             }
         }
 
-        AnimatedVisibility(
-            visible = drawerOpen,
-            enter = fadeIn(animationSpec = androidx.compose.animation.core.tween(180)) +
-                scaleIn(
-                    initialScale = .94f,
-                    animationSpec = androidx.compose.animation.core.tween(
-                        220,
-                        easing = FastOutSlowInEasing
-                    )
-                ),
-            exit = fadeOut(animationSpec = androidx.compose.animation.core.tween(140)) +
-                scaleOut(
-                    targetScale = .96f,
-                    animationSpec = androidx.compose.animation.core.tween(160)
-                )
-        ) {
-            Surface(
-                modifier = Modifier.fillMaxSize().padding(18.dp).navigationBarsPadding(),
-                shape = MaterialTheme.shapes.extraLarge,
-                tonalElevation = 8.dp
-            ) {
-                Column(Modifier.fillMaxSize().padding(20.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("Apps", style = MaterialTheme.typography.headlineSmall)
-                        Spacer(Modifier.weight(1f))
-                        TextButton(onClick = { drawerOpen = false }) { Text("Close") }
-                    }
+        if (settings) {
+            ModalBottomSheet(onDismissRequest = { settings = false }) {
+                Column(Modifier.fillMaxWidth().padding(20.dp).navigationBarsPadding()) {
+                    Text("Imux Launcher", style = MaterialTheme.typography.headlineSmall)
+                    Spacer(Modifier.height(12.dp))
+                    SettingRow("Swipe up for app drawer", swipeDrawer) { swipeDrawer = it; prefs.edit().putBoolean("swipe_drawer", it).apply() }
+                    SettingRow("Vivo launcher compatibility", prefs.getBoolean("vivo_compat_mode", false)) { VivoLauncherManager.setEnabled(context, it) }
+                    OutlinedButton(onClick = ::requestDefaultLauncher, Modifier.fillMaxWidth()) { Text("Set Imux as default launcher") }
                     Spacer(Modifier.height(8.dp))
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(4),
-                        modifier = Modifier.fillMaxSize(),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        items(apps, key = { "drawer-${it.packageName}" }) { app ->
-                            AppCell(app) {
-                                drawerOpen = false
-                                scope.launch {
-                                    delay(45)
-                                    app.launch()
-                                }
-                            }
-                        }
-                    }
+                    OutlinedButton(onClick = { settings = false; logs = true }, Modifier.fillMaxWidth()) { Text("Diagnostics and logs") }
+                    Spacer(Modifier.height(20.dp))
                 }
             }
         }
+        if (logs) LogDialog { logs = false }
     }
-
-    if (settingsOpen) {
-        ModalBottomSheet(onDismissRequest = { settingsOpen = false }) {
-            Column(Modifier.fillMaxWidth().padding(20.dp).navigationBarsPadding()) {
-                Text("Imux Launcher", style = MaterialTheme.typography.headlineSmall)
-                Spacer(Modifier.height(12.dp))
-                SettingRow("Swipe up for app drawer", swipeDrawer) {
-                    swipeDrawer = it
-                    prefs.edit().putBoolean("swipe_drawer", it).apply()
-                }
-                SettingRow("Back protection", backProtection) {
-                    backProtection = it
-                    prefs.edit().putBoolean("back_protection", it).apply()
-                }
-                SettingRow("Vivo launcher compatibility", vivoCompat) {
-                    vivoCompat = it
-                    VivoLauncherManager.setEnabled(context, it)
-                    if (it && prefs.getBoolean("root_granted_session", false)) {
-                        Thread {
-                            VivoLauncherManager.enforceImuxHome().onFailure { error ->
-                                CrashLogger.log(context, "WARN", "Vivo compatibility enable failed: ${error.message}")
-                            }
-                        }.start()
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = requestDefaultLauncher,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Set Imux as default launcher")
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    enabled = !rootBusy,
-                    onClick = {
-                        rootBusy = true
-                        rootMessage = "Requesting su permission…"
-                        requestRoot { result ->
-                            rootBusy = false
-                            rootMessage = result.fold(
-                                { "Root granted via $it" },
-                                {
-                                    "Root request failed: ${it.message ?: "permission denied"}"
-                                }
-                            )
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(if (rootBusy) "Requesting root…" else "Request root via su")
-                }
-                if (rootMessage.isNotBlank()) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(rootMessage, style = MaterialTheme.typography.bodySmall)
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = { VivoLauncherManager.emergencyRestore(context) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Emergency restore Vivo launcher")
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = {
-                        settingsOpen = false
-                        logsOpen = true
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Diagnostics and logs")
-                }
-                Spacer(Modifier.height(20.dp))
-            }
-        }
-    }
-
-    if (logsOpen) LogDialog(onDismiss = { logsOpen = false })
 }
 
-@Composable
-private fun SettingRow(
-    title: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+@Composable private fun WorkspaceGrid(
+    items: List<String>, appMap: Map<String, AppInfo>, onMove: (Int, Int) -> Unit, onLaunch: (AppInfo) -> Unit
 ) {
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(title, Modifier.weight(1f))
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-@Composable
-private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
-    var pressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) .86f else 1f,
-        animationSpec = spring(dampingRatio = .65f, stiffness = 500f),
-        label = "iconPress"
-    )
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .aspectRatio(.78f)
-            .graphicsLayer { scaleX = scale; scaleY = scale }
-            .pointerInput(Unit) {
-                detectTapGestures(
-                    onPress = {
-                        pressed = true
-                        tryAwaitRelease()
-                        pressed = false
-                    },
-                    onTap = { onLaunch() }
-                )
-            },
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        // Compose Canvas is substantially lighter than creating an Android View per icon.
-        Canvas(modifier = Modifier.size(52.dp)) {
-            val drawable = app.icon
-            val intrinsicWidth = drawable.intrinsicWidth.coerceAtLeast(1)
-            val intrinsicHeight = drawable.intrinsicHeight.coerceAtLeast(1)
-            val scaleFactor = minOf(size.width / intrinsicWidth, size.height / intrinsicHeight)
-            val drawWidth = intrinsicWidth * scaleFactor
-            val drawHeight = intrinsicHeight * scaleFactor
-            val left = ((size.width - drawWidth) / 2f).toInt()
-            val top = ((size.height - drawHeight) / 2f).toInt()
-            drawable.setBounds(
-                left,
-                top,
-                (left + drawWidth).toInt(),
-                (top + drawHeight).toInt()
-            )
-            drawIntoCanvas { canvas -> drawable.draw(canvas.nativeCanvas) }
+    var dragging by remember { mutableStateOf(-1) }
+    var dragX by remember { mutableStateOf(0f) }
+    var dragY by remember { mutableStateOf(0f) }
+    Column(Modifier.fillMaxSize()) {
+        repeat(7) { row ->
+            Row(Modifier.weight(1f).fillMaxWidth()) {
+                repeat(4) { col ->
+                    val index = row * 4 + col
+                    val app = items.getOrNull(index)?.let(appMap::get)
+                    Box(Modifier.weight(1f).fillMaxHeight().padding(2.dp).graphicsLayer {
+                        if (dragging == index) { translationX = dragX; translationY = dragY; scaleX = 1.08f; scaleY = 1.08f }
+                    }.pointerInput(app?.packageName) {
+                        detectDragGestures(
+                            onDragStart = { if (app != null) { dragging = index; dragX = 0f; dragY = 0f } },
+                            onDrag = { change, amount ->
+                                change.consume(); dragX += amount.x; dragY += amount.y
+                                val dx = (dragX / 90f).toInt(); val dy = (dragY / 76f).toInt()
+                                val target = (index + dx + dy * 4).coerceIn(0, 27)
+                                if (target != index) { onMove(index, target); dragging = target; dragX = 0f; dragY = 0f }
+                            },
+                            onDragEnd = { dragging = -1; dragX = 0f; dragY = 0f },
+                            onDragCancel = { dragging = -1 }
+                        )
+                    }.pointerInput(app?.packageName) {
+                        detectTapGestures(onTap = { app?.let(onLaunch) })
+                    }) {
+                        if (app != null) AppIcon(app)
+                    }
+                }
+            }
         }
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = app.label,
-            style = MaterialTheme.typography.labelSmall,
-            maxLines = 1,
-            modifier = Modifier.padding(horizontal = 2.dp)
-        )
     }
 }
 
-@Composable
-private fun LogDialog(onDismiss: () -> Unit) {
+@Composable private fun Dock(dock: List<String>, appMap: Map<String, AppInfo>, onLaunch: (AppInfo) -> Unit) {
+    Surface(shape = MaterialTheme.shapes.extraLarge, tonalElevation = 4.dp, modifier = Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 8.dp, vertical = 4.dp)) {
+        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            repeat(4) { i -> dock.getOrNull(i)?.let { appMap[it]?.let { AppIcon(it, Modifier.size(52.dp), onLaunch) } } }
+        }
+    }
+}
+
+@Composable private fun AppIcon(app: AppInfo, modifier: Modifier = Modifier.size(48.dp), onTap: ((AppInfo) -> Unit)? = null) {
+    Canvas(modifier.pointerInput(app.packageName) { if (onTap != null) detectTapGestures(onTap = { onTap(app) }) }) {
+        val d: Drawable = app.icon
+        val w = d.intrinsicWidth.coerceAtLeast(1); val h = d.intrinsicHeight.coerceAtLeast(1)
+        val s = minOf(size.width / w, size.height / h); val dw = w * s; val dh = h * s
+        val l = ((size.width - dw) / 2).toInt(); val t = ((size.height - dh) / 2).toInt()
+        d.setBounds(l, t, (l + dw).toInt(), (t + dh).toInt())
+        drawIntoCanvas { c -> d.draw(c.nativeCanvas) }
+    }
+}
+
+@Composable private fun SettingRow(title: String, checked: Boolean, onCheckedChange: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) { Text(title, Modifier.weight(1f)); Switch(checked, onCheckedChange) }
+}
+
+@Composable private fun LogDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    var text by remember { mutableStateOf("") }
-    val scrollState = rememberScrollState()
-
-    fun refresh() {
-        val privateLog = CrashLogger.read(context)
-        val processLog = CrashLogger.readProcessLogcat()
-        text = if (processLog.isBlank()) {
-            privateLog
-        } else {
-            "$privateLog\n\n--- IMUX PROCESS LOGCAT ---\n$processLog"
-        }
-    }
-
-    LaunchedEffect(Unit) { refresh() }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Diagnostics") },
-        text = {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 420.dp)
-                    .verticalScroll(scrollState)
-            ) {
-                Text(text, style = MaterialTheme.typography.bodySmall)
-            }
-        },
-        confirmButton = {
-            Row {
-                TextButton(onClick = { refresh() }) { Text("Refresh") }
-                TextButton(onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("Imux logs", text))
-                    Toast.makeText(context, "Logs copied", Toast.LENGTH_SHORT).show()
-                }) {
-                    Text("Copy")
-                }
-                TextButton(onClick = {
-                    CrashLogger.clear(context)
-                    refresh()
-                }) {
-                    Text("Clear")
-                }
-            }
-        }
-    )
+    var text by remember { mutableStateOf(CrashLogger.read(context)) }
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("Diagnostics") }, text = { Text(text, Modifier.heightIn(max = 420.dp).verticalScroll(androidx.compose.foundation.rememberScrollState()), style = MaterialTheme.typography.bodySmall) }, confirmButton = { TextButton({ text = CrashLogger.read(context) }) { Text("Refresh") }; TextButton({ onDismiss() }) { Text("Close") } })
 }
