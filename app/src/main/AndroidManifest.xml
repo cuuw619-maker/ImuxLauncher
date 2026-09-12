@@ -12,7 +12,7 @@
         <activity
             android:name=".CrashActivity"
             android:exported="false"
-            android:noHistory="true" />
+            android:process=":crash" />
 
         <activity
             android:name=".MainActivity"
