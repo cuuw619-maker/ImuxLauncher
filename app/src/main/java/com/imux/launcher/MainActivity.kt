@@ -29,7 +29,9 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.Close
@@ -49,6 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.getSystemService
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
 
@@ -57,7 +61,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        CrashLogger.log(this, "INFO", "MainActivity created; OriginWEB-inspired workspace")
+        CrashLogger.log(this, "INFO", "MainActivity created")
         setContent {
             val dark = androidx.compose.foundation.isSystemInDarkTheme()
             val scheme = if (Build.VERSION.SDK_INT >= 31) {
@@ -69,6 +73,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        if (prefs.getBoolean("vivo_compat_mode", false) && prefs.getBoolean("root_granted_session", false)) {
+            Thread {
+                VivoLauncherManager.suppressStockLauncher().onSuccess {
+                    CrashLogger.log(this, "INFO", "Vivo compatibility: stock launcher force-stopped")
+                }.onFailure {
+                    CrashLogger.log(this, "WARN", "Vivo compatibility failed: ${it.message}")
+                }
+            }.start()
+        }
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent?.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
+            CrashLogger.log(this, "INFO", "HOME intent received by Imux")
+        }
+    }
+
     private fun loadApps(): List<AppInfo> = runCatching {
         val pm = packageManager
         val query = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -76,11 +100,16 @@ class MainActivity : ComponentActivity() {
             .distinctBy { it.activityInfo.packageName }
             .mapNotNull { info ->
                 val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName) ?: return@mapNotNull null
-                AppInfo(info.loadLabel(pm).toString(), info.activityInfo.packageName, info.loadIcon(pm)) {
-                    CrashLogger.log(this, "INFO", "Launching ${info.activityInfo.packageName}")
-                    runCatching { startActivity(launchIntent) }
-                        .onFailure { CrashLogger.log(this, "ERROR", "Launch failed: ${it.stackTraceToString()}") }
-                }
+                AppInfo(
+                    label = info.loadLabel(pm).toString(),
+                    packageName = info.activityInfo.packageName,
+                    iconLoader = { info.loadIcon(pm) },
+                    launch = {
+                        CrashLogger.log(this, "INFO", "Launching ${info.activityInfo.packageName}")
+                        runCatching { startActivity(launchIntent) }
+                            .onFailure { CrashLogger.log(this, "ERROR", "Launch failed: ${it.stackTraceToString()}") }
+                    }
+                )
             }
             .sortedBy { it.label.lowercase(Locale.getDefault()) }
     }.onFailure { CrashLogger.log(this, "ERROR", "App scan failed: ${it.stackTraceToString()}") }
@@ -101,6 +130,7 @@ class MainActivity : ComponentActivity() {
         Thread {
             val result = RootManager.requestRoot()
             CrashLogger.log(this, if (result.isSuccess) "INFO" else "WARN", "Root: ${result.fold({ "granted via $it" }, { it.message ?: "denied" })}")
+            if (result.isSuccess) prefs.edit().putBoolean("root_granted_session", true).apply()
             runOnUiThread { onResult(result) }
         }.start()
     }
@@ -122,6 +152,7 @@ private fun ImuxHome(
     var logs by remember { mutableStateOf(false) }
     var drawerEnabled by remember { mutableStateOf(prefs.getBoolean("swipe_drawer", false)) }
     var protect by remember { mutableStateOf(prefs.getBoolean("protect_desktop", true)) }
+    var vivoCompat by remember { mutableStateOf(prefs.getBoolean("vivo_compat_mode", false)) }
     var rootBusy by remember { mutableStateOf(false) }
     var rootMessage by remember { mutableStateOf<String?>(null) }
 
@@ -143,12 +174,14 @@ private fun ImuxHome(
     ) {
         Box(
             Modifier.fillMaxSize().background(
-                Brush.linearGradient(listOf(
-                    MaterialTheme.colorScheme.primary.copy(alpha = .34f),
-                    MaterialTheme.colorScheme.tertiary.copy(alpha = .18f),
-                    MaterialTheme.colorScheme.background,
-                    MaterialTheme.colorScheme.secondary.copy(alpha = .22f)
-                ))
+                Brush.linearGradient(
+                    listOf(
+                        MaterialTheme.colorScheme.primary.copy(alpha = .34f),
+                        MaterialTheme.colorScheme.tertiary.copy(alpha = .18f),
+                        MaterialTheme.colorScheme.background,
+                        MaterialTheme.colorScheme.secondary.copy(alpha = .22f)
+                    )
+                )
             )
         )
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = wallpaperDim)))
@@ -175,12 +208,19 @@ private fun ImuxHome(
                 }
             }
 
-            HorizontalPager(state = pager, modifier = Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(horizontal = 10.dp), pageSpacing = 10.dp) { page ->
+            HorizontalPager(
+                state = pager,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                pageSpacing = 10.dp
+            ) { page ->
                 val pageApps = pages[page]
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(4), modifier = Modifier.fillMaxSize(),
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 5.dp, end = 5.dp, top = 14.dp, bottom = 92.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(pageApps, key = { it.packageName }) { AppCell(it) }
                     items(28 - pageApps.size) { Spacer(Modifier.aspectRatio(.78f)) }
@@ -190,7 +230,9 @@ private fun ImuxHome(
 
         Surface(
             modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp),
-            shape = RoundedCornerShape(30.dp), color = MaterialTheme.colorScheme.surface.copy(alpha = .76f), shadowElevation = 8.dp
+            shape = RoundedCornerShape(30.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = .76f),
+            shadowElevation = 8.dp
         ) {
             IconButton({ drawer = true }, modifier = Modifier.padding(2.dp)) { Icon(Icons.Default.Apps, "All apps") }
         }
@@ -213,7 +255,12 @@ private fun ImuxHome(
                     Spacer(Modifier.height(10.dp))
                     OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, shape = RoundedCornerShape(22.dp), label = { Text("Search applications") })
                     Spacer(Modifier.height(12.dp))
-                    LazyVerticalGrid(columns = GridCells.Fixed(4), contentPadding = PaddingValues(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         items(filtered, key = { it.packageName }) { AppCell(it) { drawer = false } }
                     }
                 }
@@ -224,9 +271,16 @@ private fun ImuxHome(
             ModalBottomSheet(onDismissRequest = { settings = false }, containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 30.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("Imux", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    Text("OriginWEB-inspired visual workspace", style = MaterialTheme.typography.bodyMedium)
+                    Text("Native Material launcher with lazy icons and crash-safe recovery.", style = MaterialTheme.typography.bodyMedium)
                     SettingRow("Swipe-up app drawer", drawerEnabled) { drawerEnabled = it; prefs.edit().putBoolean("swipe_drawer", it).apply() }
                     SettingRow("Protect desktop from Back", protect) { protect = it; prefs.edit().putBoolean("protect_desktop", it).apply() }
+                    SettingRow("Vivo launcher compatibility", vivoCompat) {
+                        vivoCompat = it
+                        VivoLauncherManager.setEnabled(context, it)
+                        if (it && prefs.getBoolean("root_granted_session", false)) {
+                            Thread { VivoLauncherManager.suppressStockLauncher() }.start()
+                        }
+                    }
                     Button(requestHome, Modifier.fillMaxWidth()) { Text("Set Imux as default launcher") }
                     OutlinedButton(enabled = !rootBusy, onClick = {
                         rootBusy = true
@@ -236,11 +290,22 @@ private fun ImuxHome(
                             rootMessage = result.fold({ "Root granted via $it" }, { "Root request failed: ${it.message ?: "permission denied"}" })
                         }
                     }, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.Shield, null); Spacer(Modifier.width(8.dp)); Text(if (rootBusy) "Waiting for su…" else "Request root via su")
+                        Icon(Icons.Default.Shield, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (rootBusy) "Waiting for su…" else "Request root via su")
                     }
-                    rootMessage?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = if (it.startsWith("Root granted")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error) }
+                    rootMessage?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = if (it.startsWith("Root granted")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            VivoLauncherManager.emergencyRestore(context)
+                            CrashLogger.log(context, "INFO", "Emergency Vivo launcher restore requested")
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Emergency restore Vivo launcher") }
                     OutlinedButton({ settings = false; logs = true }, Modifier.fillMaxWidth()) { Text("Diagnostics and logs") }
-                    Text("4 × 7 workspace. Icons have no visual outline. Opening, closing and drawer transitions use spring motion.", style = MaterialTheme.typography.bodySmall)
+                    Text("4 × 7 workspace. Icons are loaded lazily; only composed cells resolve their Drawable.", style = MaterialTheme.typography.bodySmall)
                 }
             }
         }
@@ -251,12 +316,19 @@ private fun ImuxHome(
 @Composable
 private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
     var pressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (pressed) .88f else 1f, spring(dampingRatio = .68f, stiffness = 700f), label = "iconPress")
+    val scope = rememberCoroutineScope()
+    val scale by animateFloatAsState(if (pressed) .86f else 1f, spring(dampingRatio = .68f, stiffness = 700f), label = "iconPress")
     Box(
         modifier = Modifier.fillMaxWidth().aspectRatio(.78f).graphicsLayer { scaleX = scale; scaleY = scale }.pointerInput(Unit) {
             detectTapGestures(
                 onPress = { pressed = true; tryAwaitRelease(); pressed = false },
-                onTap = { onLaunch(); app.launch() }
+                onTap = {
+                    onLaunch()
+                    scope.launch {
+                        delay(65)
+                        app.launch()
+                    }
+                }
             )
         },
         contentAlignment = Alignment.Center
@@ -264,7 +336,8 @@ private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize()) {
             AndroidView(
                 factory = { context -> android.widget.ImageView(context).apply { scaleType = android.widget.ImageView.ScaleType.FIT_CENTER; contentDescription = app.label } },
-                update = { it.setImageDrawable(app.icon) }, modifier = Modifier.size(52.dp)
+                update = { it.setImageDrawable(app.icon) },
+                modifier = Modifier.size(52.dp)
             )
             Spacer(Modifier.height(5.dp))
             Text(app.label, maxLines = 1, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onBackground, modifier = Modifier.padding(horizontal = 2.dp))
@@ -276,7 +349,8 @@ private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
 private fun SettingRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
     Surface(shape = RoundedCornerShape(22.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, Modifier.weight(1f)); Switch(checked, onChange)
+            Text(title, Modifier.weight(1f))
+            Switch(checked, onChange)
         }
     }
 }
@@ -284,14 +358,38 @@ private fun SettingRow(title: String, checked: Boolean, onChange: (Boolean) -> U
 @Composable
 private fun LogDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val log = remember { CrashLogger.read(context) }
+    val scope = rememberCoroutineScope()
+    val scroll = rememberScrollState()
+    var log by remember { mutableStateOf("Loading Imux diagnostics…") }
+
+    fun refresh() {
+        scope.launch {
+            log = withContext(Dispatchers.IO) {
+                val privateLog = CrashLogger.read(context)
+                val processLog = CrashLogger.readProcessLogcat()
+                if (processLog.isBlank()) privateLog
+                else "$privateLog\n\n--- IMUX PROCESS LOGCAT ---\n$processLog"
+            }
+        }
+    }
+    LaunchedEffect(Unit) { refresh() }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Imux diagnostics") },
-        text = { Text(log, style = MaterialTheme.typography.bodySmall) },
-        confirmButton = {
-            TextButton({ context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(android.content.ClipData.newPlainText("Imux log", log)) }) { Text("Copy log") }
+        text = {
+            Box(Modifier.heightIn(max = 420.dp).verticalScroll(scroll)) {
+                Text(log, style = MaterialTheme.typography.bodySmall)
+            }
         },
-        dismissButton = { TextButton(onDismiss) { Text("Close") } }
+        confirmButton = {
+            Row {
+                TextButton({ refresh() }) { Text("Refresh") }
+                TextButton({ context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(android.content.ClipData.newPlainText("Imux log", log)) }) { Text("Copy") }
+            }
+        },
+        dismissButton = {
+            TextButton({ CrashLogger.clear(context); log = "Imux log cleared." }) { Text("Clear") }
+        }
     )
 }
