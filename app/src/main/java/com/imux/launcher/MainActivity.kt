@@ -1,6 +1,5 @@
 package com.imux.launcher
 
-import android.app.ActivityOptions
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
@@ -40,7 +39,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -116,6 +114,7 @@ private fun ImuxHome(
     requestHome: () -> Unit,
     requestRoot: ((Result<String>) -> Unit) -> Unit
 ) {
+    val context = LocalContext.current
     var apps by remember { mutableStateOf(emptyList<AppInfo>()) }
     var drawer by remember { mutableStateOf(false) }
     var settings by remember { mutableStateOf(false) }
@@ -131,12 +130,11 @@ private fun ImuxHome(
     val pager = rememberPagerState(pageCount = { pages.size })
     val filtered = if (search.isBlank()) apps else apps.filter { it.label.contains(search, true) || it.packageName.contains(search, true) }
     val workspaceScale by animateFloatAsState(if (drawer || settings) .96f else 1f, spring(dampingRatio = .86f, stiffness = 420f), label = "workspaceScale")
-    val wallpaperBlur by animateFloatAsState(if (drawer || settings) 10f else 0f, label = "wallpaperBlur")
     val wallpaperDim by animateFloatAsState(if (drawer || settings) .34f else 0f, label = "wallpaperDim")
 
     BackHandler(enabled = drawer) { drawer = false; search = "" }
     BackHandler(enabled = !drawer && settings) { settings = false }
-    BackHandler(enabled = !drawer && !settings && protect) { CrashLogger.log(LocalContext.current, "INFO", "Back pressed; protected desktop kept visible") }
+    BackHandler(enabled = !drawer && !settings && protect) { CrashLogger.log(context, "INFO", "Back pressed; protected desktop kept visible") }
 
     Box(
         Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).pointerInput(drawerEnabled, drawer) {
@@ -144,7 +142,7 @@ private fun ImuxHome(
         }
     ) {
         Box(
-            Modifier.fillMaxSize().blur(wallpaperBlur.dp).background(
+            Modifier.fillMaxSize().background(
                 Brush.linearGradient(listOf(
                     MaterialTheme.colorScheme.primary.copy(alpha = .34f),
                     MaterialTheme.colorScheme.tertiary.copy(alpha = .18f),
@@ -155,7 +153,13 @@ private fun ImuxHome(
         )
         Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = wallpaperDim)))
 
-        Column(Modifier.fillMaxSize().scale(workspaceScale).graphicsLayer { transformOrigin = TransformOrigin.Center }) {
+        Column(
+            Modifier.fillMaxSize().graphicsLayer {
+                transformOrigin = TransformOrigin.Center
+                scaleX = workspaceScale
+                scaleY = workspaceScale
+            }
+        ) {
             Surface(
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 shape = RoundedCornerShape(28.dp),
