@@ -1,5 +1,6 @@
 package com.imux.launcher
 
+import android.app.ActivityOptions
 import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
@@ -8,12 +9,20 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
-import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -31,8 +40,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -46,19 +61,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        CrashLogger.log(this, "INFO", "MainActivity created; desktop mode")
-        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
-            override fun handleOnBackPressed() {
-                CrashLogger.log(this@MainActivity, "INFO", "Back pressed; launcher remains active")
-            }
-        })
+        CrashLogger.log(this, "INFO", "MainActivity created; OriginWEB-inspired workspace")
         setContent {
             val dark = androidx.compose.foundation.isSystemInDarkTheme()
             val scheme = if (Build.VERSION.SDK_INT >= 31) {
                 if (dark) dynamicDarkColorScheme(this) else dynamicLightColorScheme(this)
             } else if (dark) darkColorScheme() else lightColorScheme()
             MaterialTheme(colorScheme = scheme) {
-                ImuxHome(prefs = prefs, loadApps = ::loadApps, requestHome = ::requestDefaultLauncher, requestRoot = ::requestRoot)
+                ImuxHome(
+                    prefs = prefs,
+                    loadApps = ::loadApps,
+                    requestHome = ::requestDefaultLauncher,
+                    requestRoot = ::requestRoot
+                )
             }
         }
     }
@@ -71,17 +86,25 @@ class MainActivity : ComponentActivity() {
             .mapNotNull { info ->
                 val launchIntent = pm.getLaunchIntentForPackage(info.activityInfo.packageName) ?: return@mapNotNull null
                 AppInfo(
-                    info.loadLabel(pm).toString(), info.activityInfo.packageName, info.loadIcon(pm),
+                    info.loadLabel(pm).toString(),
+                    info.activityInfo.packageName,
+                    info.loadIcon(pm),
                     launch = {
                         CrashLogger.log(this, "INFO", "Launching ${info.activityInfo.packageName}")
-                        runCatching { startActivity(launchIntent) }.onFailure {
+                        runCatching {
+                            if (Build.VERSION.SDK_INT >= 16) {
+                                startActivity(launchIntent, ActivityOptions.makeBasic().toBundle())
+                            } else startActivity(launchIntent)
+                        }.onFailure {
                             CrashLogger.log(this, "ERROR", "Launch failed: ${it.stackTraceToString()}")
                         }
                     }
                 )
-            }.sortedBy { it.label.lowercase(Locale.getDefault()) }
-    }.onFailure { CrashLogger.log(this, "ERROR", "App scan failed: ${it.stackTraceToString()}") }
-        .getOrDefault(emptyList())
+            }
+            .sortedBy { it.label.lowercase(Locale.getDefault()) }
+    }.onFailure {
+        CrashLogger.log(this, "ERROR", "App scan failed: ${it.stackTraceToString()}")
+    }.getOrDefault(emptyList())
 
     private fun requestDefaultLauncher() {
         runCatching {
@@ -89,19 +112,22 @@ class MainActivity : ComponentActivity() {
                 val role = getSystemService<RoleManager>()
                 if (role?.isRoleAvailable(RoleManager.ROLE_HOME) == true) {
                     startActivity(role.createRequestRoleIntent(RoleManager.ROLE_HOME))
-                } else {
-                    startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
-                }
-            } else {
-                startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
-            }
-        }.onFailure { CrashLogger.log(this, "ERROR", "HOME role request failed: ${it.stackTraceToString()}") }
+                } else startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+            } else startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
+        }.onFailure {
+            CrashLogger.log(this, "ERROR", "HOME role request failed: ${it.stackTraceToString()}")
+        }
     }
 
-    private fun requestRoot() {
+    private fun requestRoot(onResult: (Result<String>) -> Unit) {
         Thread {
             val result = RootManager.requestRoot()
-            CrashLogger.log(this, if (result.isSuccess) "INFO" else "WARN", "Root: ${result.fold({ "granted via $it" }, { it.message ?: "denied" })}")
+            CrashLogger.log(
+                this,
+                if (result.isSuccess) "INFO" else "WARN",
+                "Root: ${result.fold({ "granted via $it" }, { it.message ?: "denied" })}"
+            )
+            runOnUiThread { onResult(result) }
         }.start()
     }
 }
@@ -112,7 +138,7 @@ private fun ImuxHome(
     prefs: android.content.SharedPreferences,
     loadApps: () -> List<AppInfo>,
     requestHome: () -> Unit,
-    requestRoot: () -> Unit
+    requestRoot: ((Result<String>) -> Unit) -> Unit
 ) {
     var apps by remember { mutableStateOf(emptyList<AppInfo>()) }
     var drawer by remember { mutableStateOf(false) }
@@ -121,38 +147,103 @@ private fun ImuxHome(
     var logs by remember { mutableStateOf(false) }
     var drawerEnabled by remember { mutableStateOf(prefs.getBoolean("swipe_drawer", false)) }
     var protect by remember { mutableStateOf(prefs.getBoolean("protect_desktop", true)) }
+    var rootBusy by remember { mutableStateOf(false) }
+    var rootMessage by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(Unit) { apps = withContext(Dispatchers.Default) { loadApps() } }
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.Default) { loadApps() }
+    }
+
     val pages = apps.chunked(28).ifEmpty { listOf(emptyList()) }
     val pager = rememberPagerState(pageCount = { pages.size })
-    val filtered = if (search.isBlank()) apps else apps.filter { it.label.contains(search, true) || it.packageName.contains(search, true) }
+    val filtered = if (search.isBlank()) apps else apps.filter {
+        it.label.contains(search, true) || it.packageName.contains(search, true)
+    }
+    val workspaceScale by animateFloatAsState(
+        if (drawer || settings) 0.96f else 1f,
+        animationSpec = spring(dampingRatio = 0.86f, stiffness = 420f),
+        label = "workspaceScale"
+    )
+    val wallpaperBlur by animateFloatAsState(if (drawer || settings) 10f else 0f, label = "wallpaperBlur")
+    val wallpaperDim by animateFloatAsState(if (drawer || settings) 0.34f else 0f, label = "wallpaperDim")
+
+    BackHandler(enabled = drawer) {
+        drawer = false
+        search = ""
+    }
+    BackHandler(enabled = !drawer && settings) { settings = false }
+    BackHandler(enabled = !drawer && !settings && protect) {
+        CrashLogger.log(LocalContext.current, "INFO", "Back pressed; protected desktop kept visible")
+    }
 
     Box(
-        Modifier.fillMaxSize().pointerInput(drawerEnabled, drawer) {
-            if (drawerEnabled && !drawer) detectVerticalDragGestures { _, dy -> if (dy < -36f) drawer = true }
-        }
-    ) {
-        Scaffold(
-            containerColor = MaterialTheme.colorScheme.background,
-            topBar = {
-                Surface(tonalElevation = 2.dp) {
-                    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f)) {
-                            Text("IMUX", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
-                            Text("${pager.currentPage + 1} / ${pages.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        }
-                        IconButton({ settings = true }) { Icon(Icons.Default.Settings, "Settings") }
-                    }
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .pointerInput(drawerEnabled, drawer) {
+                if (drawerEnabled && !drawer) {
+                    detectVerticalDragGestures { _, dy -> if (dy < -42f) drawer = true }
                 }
-            },
-            floatingActionButton = { FloatingActionButton({ drawer = true }) { Icon(Icons.Default.Apps, "All apps") } }
-        ) { pad ->
-            HorizontalPager(state = pager, modifier = Modifier.fillMaxSize().padding(pad), contentPadding = PaddingValues(horizontal = 10.dp), pageSpacing = 8.dp) { page ->
+            }
+    ) {
+        // OriginWEB-inspired wallpaper: deep gradient + slow tonal layers.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = 1f }
+                .blur(wallpaperBlur.dp)
+                .background(
+                    Brush.linearGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.34f),
+                            MaterialTheme.colorScheme.tertiary.copy(alpha = 0.18f),
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.secondary.copy(alpha = 0.22f)
+                        )
+                    )
+                )
+        )
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = wallpaperDim)))
+
+        Column(
+            Modifier
+                .fillMaxSize()
+                .scale(workspaceScale)
+                .graphicsLayer {
+                    transformOrigin = androidx.compose.ui.graphics.TransformOrigin.Center
+                }
+        ) {
+            Surface(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.62f),
+                tonalElevation = 0.dp
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(start = 18.dp, end = 6.dp, top = 8.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("IMUX", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                        Text("${pager.currentPage + 1} / ${pages.size}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                    }
+                    IconButton({ settings = true }) { Icon(Icons.Default.Settings, "Settings") }
+                }
+            }
+
+            HorizontalPager(
+                state = pager,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                pageSpacing = 10.dp
+            ) { page ->
                 val pageApps = pages[page]
                 LazyVerticalGrid(
-                    columns = GridCells.Fixed(4), modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(4.dp, 10.dp, 4.dp, 88.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    columns = GridCells.Fixed(4),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(start = 5.dp, end = 5.dp, top = 14.dp, bottom = 92.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     items(pageApps, key = { it.packageName }) { AppCell(it) }
                     items(28 - pageApps.size) { Spacer(Modifier.aspectRatio(.78f)) }
@@ -160,9 +251,27 @@ private fun ImuxHome(
             }
         }
 
-        AnimatedVisibility(drawer, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.fillMaxSize()) {
-            Surface(color = MaterialTheme.colorScheme.background, tonalElevation = 8.dp) {
-                Column(Modifier.fillMaxSize().padding(20.dp)) {
+        // Floating dock is intentionally icon-only: no icon outlines/cards.
+        Surface(
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp),
+            shape = RoundedCornerShape(30.dp),
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.76f),
+            shadowElevation = 8.dp,
+            tonalElevation = 3.dp
+        ) {
+            Row(Modifier.padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton({ drawer = true }) { Icon(Icons.Default.Apps, "All apps") }
+            }
+        }
+
+        AnimatedVisibility(
+            visible = drawer,
+            enter = fadeIn(FastOutSlowInEasing) + scaleIn(initialScale = 0.94f, animationSpec = spring(dampingRatio = .82f, stiffness = 380f)),
+            exit = fadeOut() + scaleOut(targetScale = 0.94f, animationSpec = spring(dampingRatio = .9f, stiffness = 420f)),
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Surface(color = MaterialTheme.colorScheme.background.copy(alpha = .94f), tonalElevation = 8.dp) {
+                Column(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 14.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("All apps", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
@@ -171,9 +280,21 @@ private fun ImuxHome(
                         IconButton({ drawer = false; search = "" }) { Icon(Icons.Default.Close, "Close") }
                     }
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Search applications") })
-                    Spacer(Modifier.height(10.dp))
-                    LazyVerticalGrid(columns = GridCells.Fixed(4), contentPadding = PaddingValues(bottom = 20.dp), verticalArrangement = Arrangement.spacedBy(10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(
+                        value = search,
+                        onValueChange = { search = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(22.dp),
+                        label = { Text("Search applications") }
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(4),
+                        contentPadding = PaddingValues(bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         items(filtered, key = { it.packageName }) { AppCell(it) { drawer = false } }
                     }
                 }
@@ -181,15 +302,56 @@ private fun ImuxHome(
         }
 
         if (settings) {
-            ModalBottomSheet({ settings = false }) {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 30.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("Imux settings", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    SettingRow("Swipe-up app drawer", drawerEnabled) { drawerEnabled = it; prefs.edit().putBoolean("swipe_drawer", it).apply() }
-                    SettingRow("Protect desktop from Back", protect) { protect = it; prefs.edit().putBoolean("protect_desktop", it).apply() }
+            ModalBottomSheet(
+                onDismissRequest = { settings = false },
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+            ) {
+                Column(
+                    Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 30.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("Imux", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    Text("OriginWEB-inspired visual workspace", style = MaterialTheme.typography.bodyMedium)
+                    SettingRow("Swipe-up app drawer", drawerEnabled) {
+                        drawerEnabled = it
+                        prefs.edit().putBoolean("swipe_drawer", it).apply()
+                    }
+                    SettingRow("Protect desktop from Back", protect) {
+                        protect = it
+                        prefs.edit().putBoolean("protect_desktop", it).apply()
+                    }
                     Button(requestHome, Modifier.fillMaxWidth()) { Text("Set Imux as default launcher") }
-                    OutlinedButton(requestRoot, Modifier.fillMaxWidth()) { Icon(Icons.Default.Shield, null); Spacer(Modifier.width(8.dp)); Text("Request root via su") }
+                    OutlinedButton(
+                        enabled = !rootBusy,
+                        onClick = {
+                            rootBusy = true
+                            rootMessage = "Requesting su permission…"
+                            requestRoot { result ->
+                                rootBusy = false
+                                rootMessage = result.fold(
+                                    { "Root granted via $it" },
+                                    { "Root request failed: ${it.message ?: "permission denied"}" }
+                                )
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.Default.Shield, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (rootBusy) "Waiting for su…" else "Request root via su")
+                    }
+                    rootMessage?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (it.startsWith("Root granted")) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                        )
+                    }
                     OutlinedButton({ settings = false; logs = true }, Modifier.fillMaxWidth()) { Text("Diagnostics and logs") }
-                    Text("Material You / Material 3 dynamic color is used where Android supports it. The workspace remains 4 × 7 cells per page.", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "4 × 7 workspace. Icons use a transparent hit area without a visual outline. Opening and closing uses spring-based motion.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                 }
             }
         }
@@ -199,19 +361,73 @@ private fun ImuxHome(
 
 @Composable
 private fun AppCell(app: AppInfo, onLaunch: () -> Unit = {}) {
-    Card(onClick = { onLaunch(); app.launch() }, modifier = Modifier.fillMaxWidth().aspectRatio(.78f), shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Column(Modifier.fillMaxSize().padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            AndroidView({ context -> android.widget.ImageView(context).apply { scaleType = android.widget.ImageView.ScaleType.FIT_CENTER } }, update = { it.setImageDrawable(app.icon) }, modifier = Modifier.size(50.dp))
-            Spacer(Modifier.height(5.dp)); Text(app.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
+    val view = LocalView.current
+    var pressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) .88f else 1f,
+        animationSpec = spring(dampingRatio = .68f, stiffness = 700f),
+        label = "iconPress"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(.78f)
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .pointerInput(Unit) {
+                androidx.compose.foundation.gestures.detectTapGestures(
+                    onPress = {
+                        pressed = true
+                        tryAwaitRelease()
+                        pressed = false
+                    },
+                    onTap = {
+                        onLaunch()
+                        app.launch()
+                    }
+                )
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            AndroidView(
+                factory = { context ->
+                    android.widget.ImageView(context).apply {
+                        scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                        contentDescription = app.label
+                    }
+                },
+                update = { it.setImageDrawable(app.icon) },
+                modifier = Modifier.size(52.dp)
+            )
+            Spacer(Modifier.height(5.dp))
+            Text(
+                app.label,
+                maxLines = 1,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
         }
     }
 }
 
 @Composable
 private fun SettingRow(title: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Card(shape = RoundedCornerShape(22.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(title, Modifier.weight(1f)); Switch(checked, onChange)
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer
+    ) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, Modifier.weight(1f))
+            Switch(checked, onChange)
         }
     }
 }
@@ -221,10 +437,16 @@ private fun LogDialog(onDismiss: () -> Unit) {
     val context = LocalContext.current
     val log = remember { CrashLogger.read(context) }
     AlertDialog(
-        onDismissRequest = onDismiss, title = { Text("Imux diagnostics") },
+        onDismissRequest = onDismiss,
+        title = { Text("Imux diagnostics") },
         text = { Text(log, style = MaterialTheme.typography.bodySmall) },
         confirmButton = {
-            TextButton({ context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(android.content.ClipData.newPlainText("Imux log", log)) }) { Text("Copy log") }
-        }, dismissButton = { TextButton(onDismiss) { Text("Close") } }
+            TextButton({
+                context.getSystemService<android.content.ClipboardManager>()?.setPrimaryClip(
+                    android.content.ClipData.newPlainText("Imux log", log)
+                )
+            }) { Text("Copy log") }
+        },
+        dismissButton = { TextButton(onDismiss) { Text("Close") } }
     )
 }
