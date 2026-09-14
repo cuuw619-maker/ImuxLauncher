@@ -15,4 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ImuxLauncher"
-include(":app")
+include(":launcher")
+include(":game-core")
